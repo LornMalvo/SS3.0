@@ -67,6 +67,10 @@ DIAS_RANGO = {"1M": 31, "1A": 366}
 # Colores del plan DCA sobre el gráfico: entradas en familia azul, salidas en
 # familia verde, stop en rojo. El tono se aclara del nivel 1 al 3, de modo que
 # el color codifica qué se hace y en qué orden llega.
+# Medias móviles sobre el gráfico de precio: cada una es una traza con su
+# entrada en la leyenda (se activan/desactivan pulsando en ella).
+COLORES_MEDIAS = {"MM50": "#0056a2", "MM100": "#25a18e", "MM200": "#f97316"}
+
 PLAN_COLORES_ENTRADA = ("#1d4ed8", "#3b82f6", "#93c5fd")
 PLAN_COLORES_SALIDA = ("#059669", "#10b981", "#6ee7b7")
 PLAN_COLOR_STOP = C_ROJO
@@ -343,6 +347,9 @@ TTL_HISTORICO_RESPALDO = 21600
 TTL_INFO = 3600
 TTL_ESTADOS_FINANCIEROS = 172800   # solo cambian 4 veces al año
 TTL_NOTICIAS = 900
+TTL_EARNINGS = 21600          # calendario de resultados: cambia con cada publicación
+TTL_TRADUCCION = 172800       # la descripción de una empresa apenas cambia
+TTL_ESTADOS_FINANCIEROS_L1 = TTL_ESTADOS_FINANCIEROS
 TTL_FX = 600
 TTL_LOTE = 900
 
@@ -355,6 +362,13 @@ FRESCURA_ESPERADA = {
     "fundamentales": 172800 * 45,   # ~un trimestre
     "noticias": 3600,
 }
+
+# ---------------------------------------------------------------- Finnhub ----
+NOTICIAS_N = 5
+NOTICIAS_DIAS = 30            # ventana hacia atrás para company-news
+EARNINGS_TRIMESTRES = 4       # racha de sorpresas mostrada (un año completo)
+EARNINGS_DIAS_ATRAS = 400     # ventana del calendario: ~4 trimestres pasados
+EARNINGS_DIAS_ADELANTE = 120  # ... y el próximo
 
 MERCADO_ZONA_HORARIA = "America/New_York"
 MERCADO_HORA_APERTURA = (9, 30)

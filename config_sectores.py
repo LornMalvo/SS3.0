@@ -52,6 +52,24 @@ MARGEN_OPERATIVO_SECTOR = {
     "Financial Services": 0.25, "Healthcare": 0.13, "Industrials": 0.11,
     "Real Estate": 0.35, "Technology": 0.22, "Utilities": 0.20,
 }
+PEG_SECTOR = {
+    "Basic Materials": 1.5, "Communication Services": 1.8,
+    "Consumer Cyclical": 1.7, "Consumer Defensive": 2.2, "Energy": 1.3,
+    "Financial Services": 1.4, "Healthcare": 1.9, "Industrials": 1.8,
+    "Real Estate": 2.3, "Technology": 2.0, "Utilities": 2.5,
+}
+MARGEN_NETO_SECTOR = {
+    "Basic Materials": 0.08, "Communication Services": 0.10,
+    "Consumer Cyclical": 0.06, "Consumer Defensive": 0.06, "Energy": 0.08,
+    "Financial Services": 0.22, "Healthcare": 0.07, "Industrials": 0.08,
+    "Real Estate": 0.13, "Technology": 0.18, "Utilities": 0.11,
+}
+ROE_SECTOR = {
+    "Basic Materials": 0.12, "Communication Services": 0.13,
+    "Consumer Cyclical": 0.18, "Consumer Defensive": 0.15, "Energy": 0.11,
+    "Financial Services": 0.12, "Healthcare": 0.10, "Industrials": 0.16,
+    "Real Estate": 0.05, "Technology": 0.22, "Utilities": 0.09,
+}
 ROIC_SECTOR = {
     "Basic Materials": 0.07, "Communication Services": 0.10,
     "Consumer Cyclical": 0.10, "Consumer Defensive": 0.11, "Energy": 0.07,

@@ -53,6 +53,19 @@ def fmt_grande(valor) -> str:
     return fmt_num(v, 0)
 
 
+def fmt_importe(valor, divisa: str | None) -> str:
+    """Importe grande (capitalización, caja, FCF) en su divisa y, si no es
+    EUR, su conversión entre paréntesis."""
+    if not es_dato(valor):
+        return TEXTO_ND
+    simbolo = {"USD": "$", "EUR": "€", "GBP": "£"}.get(divisa or "", divisa or "")
+    base = f"{fmt_grande(valor)} {simbolo}".strip()
+    if divisa == "EUR" or not divisa:
+        return base
+    eur, _ = convertir_a_eur(valor, divisa)
+    return f"{base} ({fmt_grande(eur)} €)" if eur is not None else base
+
+
 def fmt_precio(valor, divisa: str | None, decimales: int = 2) -> str:
     """Precio en su divisa y, si no es EUR, su equivalente en EUR entre
     paréntesis (convención global de la app)."""

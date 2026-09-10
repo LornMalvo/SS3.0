@@ -2,15 +2,14 @@
 
   [ campo ticker ][ Analizar ]
   etiqueta TICKER · Nombre -> Sector      Precio actual      [☆ Favorito]
-  ┌ Contexto (1) ┐ ┌ Gráfico + datos técnicos (2) ─────────┐
-  └──────────────┘ └ Anotaciones manuales ─────────────────┘
+  ┌ Contexto (1) ┐ ┌ Gráfico + MACD + fundamentales y técnicos (2) ┐
+  └──────────────┘ └ Anotaciones manuales ─────────────────────────┘
   ┌ Calidad / FV ┐ ┌ Timing y señal ┐ ┌ Plan DCA y veredicto ┐
 
-El resultado caro (histórico, info, indicadores) vive en
-`st.session_state["analisis"]` y solo se recalcula al pulsar Analizar. Los
-cambios baratos (rango del gráfico, toggle del plan, estrella, anotación)
-provocan reruns que NO repiten peticiones: todo lo que leen está cacheado o
-ya en session_state.
+El resultado caro vive en `st.session_state["analisis"]` y solo se recalcula
+al pulsar Analizar. Los cambios baratos (rango, toggle, estrella, nota)
+provocan reruns que NO repiten peticiones: todo está cacheado o en
+session_state.
 """
 
 from __future__ import annotations
@@ -18,20 +17,30 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+import core_fundamentales
 import core_indicadores
+import datos_finnhub
+import datos_traduccion
 import db_supabase
 import ui_componentes as ui
 import ui_graficos
+import ui_metricas
 from config_settings import (
-    C_AZUL,
     DIAS_RANGO,
+    EARNINGS_TRIMESTRES,
     RANGO_GRAFICO_DEFECTO,
     RANGOS_GRAFICO,
     TEXTO_ND,
 )
 from core_ponderar import es_dato
 from datos_cache import cubo_mercado
-from datos_yfinance import obtener_historico, obtener_info, obtener_intradia, obtener_precio_actual
+from datos_yfinance import (
+    obtener_estados_financieros,
+    obtener_historico,
+    obtener_info,
+    obtener_intradia,
+    obtener_precio_actual,
+)
 
 CLAVE_ANALISIS = "analisis"
 CLAVE_TICKER_PENDIENTE = "ticker_pendiente"   # lo rellena Favoritos/Rastreador
@@ -39,8 +48,8 @@ CLAVE_TICKER_PENDIENTE = "ticker_pendiente"   # lo rellena Favoritos/Rastreador
 
 # ----------------------------------------------------------------- análisis --
 def analizar(ticker: str) -> dict | None:
-    """Ejecuta el análisis completo y lo devuelve como dict serializable en
-    session_state. Los motores (sesiones 2-3) añadirán sus claves aquí."""
+    """Ejecuta el análisis completo. Los motores (sesiones 2-3) añadirán sus
+    claves aquí a partir de `fundamentales`, `estados` e `indicadores`."""
     ticker = ticker.strip().upper()
     if not ticker:
         return None
@@ -49,15 +58,18 @@ def analizar(ticker: str) -> dict | None:
     if not historico.ok:
         return None
     info = obtener_info(ticker)
-    precio = obtener_precio_actual(ticker)
-    df = historico.valor
+    estados = obtener_estados_financieros(ticker)
     return {
         "ticker": ticker,
         "cubo": cubo,
         "historico": historico,
         "info": info,
-        "precio": precio,
-        "indicadores": core_indicadores.resumen(df),
+        "estados": estados,
+        "precio": obtener_precio_actual(ticker),
+        "noticias": datos_finnhub.obtener_noticias(ticker),
+        "earnings": datos_finnhub.obtener_earnings(ticker),
+        "fundamentales": core_fundamentales.extraer(info.valor, estados.valor),
+        "indicadores": core_indicadores.resumen(historico.valor),
         "calidad": None,       # sesión 2
         "fair_value": None,    # sesión 2
         "timing": None,        # sesión 3
@@ -89,11 +101,14 @@ def _formulario() -> None:
 
 
 # ----------------------------------------------------------------- cabecera --
+def _divisa(a: dict) -> str:
+    return (a["precio"].valor or {}).get("divisa") or (a["info"].valor or {}).get("currency") or ""
+
+
 def _cabecera(a: dict) -> None:
     info = a["info"].valor or {}
     precio = a["precio"].valor or {}
     ticker = a["ticker"]
-    divisa = precio.get("divisa") or info.get("currency") or ""
     nombre = info.get("longName") or info.get("shortName") or TEXTO_ND
     sector = info.get("sector") or TEXTO_ND
     industria = info.get("industry")
@@ -103,20 +118,17 @@ def _cabecera(a: dict) -> None:
         st.markdown('<div class="ss-etiqueta">Ticker analizado</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="ss-ticker">{ticker}</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="ss-empresa">{ui.escapar(nombre)}</div>', unsafe_allow_html=True)
-        st.markdown(
-            f'<div class="ss-sector">{sector}' + (f" · {industria}" if industria else "") + "</div>",
-            unsafe_allow_html=True,
-        )
+        st.markdown(f'<div class="ss-sector">{sector}' + (f" · {industria}" if industria else "") + "</div>",
+                    unsafe_allow_html=True)
     with c_precio:
         st.markdown('<div class="ss-etiqueta">Precio actual de cotización</div>', unsafe_allow_html=True)
         p = precio.get("precio") if precio else a["indicadores"].get("precio")
         var = precio.get("variacion_pct") if precio else None
+        var_html = ""
         if es_dato(var):
             clase = "ss-var-pos" if var >= 0 else "ss-var-neg"
             var_html = f'<span class="ss-var {clase}">{ui.fmt_pct(var)}</span>'
-        else:
-            var_html = ""
-        st.markdown(f'<div class="ss-precio">{ui.escapar(ui.fmt_precio(p, divisa))}{var_html}</div>',
+        st.markdown(f'<div class="ss-precio">{ui.escapar(ui.fmt_precio(p, _divisa(a)))}{var_html}</div>',
                     unsafe_allow_html=True)
         ui.frescura(a["precio"].obtenido_en if a["precio"].ok else None, a["precio"].fuente, "precio")
     with c_fav:
@@ -130,47 +142,102 @@ def _cabecera(a: dict) -> None:
             st.caption("Sin Supabase: favoritos solo en esta sesión")
 
 
-# ----------------------------------------------------------------- bloques --
-def _bloque_contexto(a: dict) -> None:
+# --------------------------------------------------------- bloque 2: contexto --
+def _descripcion(a: dict) -> None:
     info = a["info"].valor or {}
+    original = info.get("longBusinessSummary")
+    if not original:
+        ui.nd("Descripción no disponible")
+        return
+    traducida = datos_traduccion.traducir(a["ticker"], original)
+    texto = traducida or original
+    st.markdown(f'<div style="font-size:.84rem;line-height:1.5">{ui.escapar(texto)}</div>',
+                unsafe_allow_html=True)
+    if traducida is None:
+        st.markdown('<div class="ss-anotacion">Traducción no disponible; se muestra el texto original.</div>',
+                    unsafe_allow_html=True)
+
+
+def _noticias(a: dict) -> None:
+    st.markdown('<div class="ss-racha-tit">Últimas noticias</div>', unsafe_allow_html=True)
+    noticias = a["noticias"].valor
+    if not noticias:
+        ui.nd("Sin noticias disponibles (Finnhub cubre principalmente valores de EE. UU.)")
+        return
+    for n in noticias:
+        st.markdown(
+            f'<div class="ss-noticia"><a href="{n["url"]}" target="_blank">{ui.escapar(n["titular"])}</a>'
+            f'<br><small>{n["fecha"]:%d/%m/%Y} · {ui.escapar(n["fuente"])}</small></div>',
+            unsafe_allow_html=True,
+        )
+
+
+def _earnings(a: dict) -> None:
+    st.markdown('<div class="ss-racha-tit" style="margin-top:.6rem">Últimos resultados</div>',
+                unsafe_allow_html=True)
+    e = a["earnings"].valor
+    divisa = a["fundamentales"].get("divisa")
+    if not e or not e.get("pasados"):
+        ui.nd("Resultados vs. consenso no disponibles")
+    else:
+        ultimo = e["pasados"][0]
+        ui.metrica(f"BPA {ultimo['fecha']:%m/%Y}",
+                   f"{ui.fmt_num(ultimo['eps_real'])} vs {ui.fmt_num(ultimo['eps_est'])}",
+                   ui.fmt_pct(ultimo["eps_sorpresa_pct"]))
+        ui.metrica("Ingresos",
+                   f"{ui.fmt_importe(ultimo['rev_real'], divisa)} vs {ui.fmt_grande(ultimo['rev_est'])}",
+                   ui.fmt_pct(ultimo["rev_sorpresa_pct"]))
+        _racha(e["pasados"][:EARNINGS_TRIMESTRES])
+    proximo = (e or {}).get("proximo")
+    if proximo:
+        eti = f"{proximo['fecha']:%d/%m/%Y}" + (f" ({proximo['hora']})" if proximo.get("hora") else "")
+        ui.metrica("Próximo earnings", eti, f"BPA est. {ui.fmt_num(proximo.get('eps_est'))}")
+    else:
+        ui.metrica("Próximo earnings", TEXTO_ND)
+
+
+def _racha(pasados: list[dict]) -> None:
+    """Racha de sorpresas de BPA: verde si batió, rojo si falló."""
+    filas = ['<div class="ss-racha"><div class="ss-racha-fila ss-racha-cab">'
+             '<span>Trim.</span><span>Real</span><span>Est.</span><span>Sorpresa</span></div>']
+    for p in pasados:
+        s = p["eps_sorpresa_pct"]
+        color = "#10b981" if es_dato(s) and s >= 0 else ("#dc2626" if es_dato(s) else "#64748b")
+        filas.append(
+            f'<div class="ss-racha-fila"><span>{p["fecha"]:%m/%Y}</span>'
+            f'<span>{ui.fmt_num(p["eps_real"])}</span><span>{ui.fmt_num(p["eps_est"])}</span>'
+            f'<span style="color:{color};font-weight:600">{ui.fmt_pct(s)}</span></div>'
+        )
+    filas.append("</div>")
+    st.markdown("".join(filas), unsafe_allow_html=True)
+
+
+def _bloque_contexto(a: dict) -> None:
     with ui.tarjeta("Descripción, noticias y últimos resultados"):
-        resumen = info.get("longBusinessSummary")
-        if resumen:
-            st.markdown(f'<div style="font-size:.85rem;line-height:1.5">{ui.escapar(resumen)}</div>',
-                        unsafe_allow_html=True)
-        else:
-            ui.nd("Descripción no disponible")
+        _descripcion(a)
         st.markdown("")
-        for etiqueta, clave, fmt in (
-            ("Capitalización", "marketCap", ui.fmt_grande),
-            ("Empleados", "fullTimeEmployees", lambda v: ui.fmt_num(v, 0)),
-            ("País", "country", lambda v: v or TEXTO_ND),
-        ):
-            ui.metrica(etiqueta, fmt(info.get(clave)))
-        ui.pendiente("Noticias (5 últimas), earnings vs. consenso con racha de sorpresas y fecha del "
-                     "próximo earnings: se conectan con Finnhub en la sesión 2. La descripción se "
-                     "traducirá con deep-translator.")
-        ui.frescura(a["info"].obtenido_en if a["info"].ok else None, a["info"].fuente, "info")
+        _noticias(a)
+        _earnings(a)
+        ui.frescura(a["noticias"].obtenido_en, "yfinance + finnhub", "noticias")
 
 
-def _serie_para_rango(a: dict, rango: str):
-    """1M/1A/MAX recortan el histórico base ya en memoria; 1D/1S piden
-    intradía (cacheado por cubo)."""
+# ---------------------------------------------------------- bloque 3: gráfico --
+def _serie_para_rango(a: dict, rango: str) -> tuple[pd.DataFrame, pd.Timestamp | None, bool]:
+    """(serie completa, inicio del recorte, con_medias). 1M/1A/MAX recortan
+    el histórico base ya en memoria; 1D/1S piden intradía (cacheado por cubo)
+    y no llevan medias diarias."""
     df = a["historico"].valor
     spec = RANGOS_GRAFICO.get(rango)
     if spec is not None:
         intra = obtener_intradia(a["ticker"], spec[0], spec[1], a["cubo"])
-        return intra.valor if intra.ok else df.tail(5)
+        return (intra.valor, None, False) if intra.ok else (df, df.index[-1] - pd.Timedelta(days=7), True)
     if rango in DIAS_RANGO:
-        return df.loc[df.index[-1] - pd.Timedelta(days=DIAS_RANGO[rango]):]
-    return df
+        return df, df.index[-1] - pd.Timedelta(days=DIAS_RANGO[rango]), True
+    return df, None, True
 
 
 def _bloque_grafico(a: dict) -> None:
-    ind = a["indicadores"]
-    info = a["info"].valor or {}
-    divisa = (a["precio"].valor or {}).get("divisa") or info.get("currency") or ""
-    with ui.tarjeta("Gráfico de cotización · MACD · datos técnicos"):
+    with ui.tarjeta("Gráfico de cotización · MACD · fundamentales y análisis técnico"):
         c_rango, c_toggle = st.columns([3, 1])
         with c_rango:
             rango = st.segmented_control("Rango", options=list(RANGOS_GRAFICO), key="rango_grafico",
@@ -178,27 +245,16 @@ def _bloque_grafico(a: dict) -> None:
         with c_toggle:
             mostrar_plan = st.toggle("Plan DCA", value=False, key="toggle_plan",
                                      disabled=a.get("plan") is None,
-                                     help="Superpone entradas, salidas y stop del plan (disponible en la sesión 3)")
-        df = _serie_para_rango(a, rango or RANGO_GRAFICO_DEFECTO)
-        st.plotly_chart(ui_graficos.grafico_precio_macd(df, a.get("plan"), mostrar_plan, divisa),
-                        width="stretch", config={"displayModeBar": False})
+                                     help="Superpone entradas, salidas y stop del plan (sesión 3)")
+        df, inicio, con_medias = _serie_para_rango(a, rango or RANGO_GRAFICO_DEFECTO)
+        fig = ui_graficos.grafico_precio_macd(df, inicio, con_medias, a.get("plan"), mostrar_plan, _divisa(a))
+        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
+        st.markdown('<div class="ss-anotacion">Pulsa en la leyenda para mostrar u ocultar velas, línea '
+                    'y medias móviles.</div>', unsafe_allow_html=True)
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            ui.metrica("MM50", ui.fmt_num(ind.get("mm50")), ui.fmt_pct(ind.get("dist_mm50")))
-            ui.metrica("MM100", ui.fmt_num(ind.get("mm100")), ui.fmt_pct(ind.get("dist_mm100")))
-            ui.metrica("MM200", ui.fmt_num(ind.get("mm200")), ui.fmt_pct(ind.get("dist_mm200")))
-        with c2:
-            ui.metrica("ATR (14)", ui.fmt_num(ind.get("atr")), ui.fmt_pct(ind.get("atr_pct"), signo=False))
-            ui.metrica("OBV", ui.fmt_grande(ind.get("obv")))
-            ui.metrica("ADX (14)", ui.fmt_num(ind.get("adx"), 1))
-        with c3:
-            ui.metrica("Short interest", ui.fmt_pct(
-                info.get("shortPercentOfFloat") * 100 if es_dato(info.get("shortPercentOfFloat")) else None,
-                signo=False))
-            ui.metrica("Short ratio", ui.fmt_num(info.get("shortRatio"), 1))
-            ui.metrica("Beta", ui.fmt_num(info.get("beta")))
-        ui.frescura(a["historico"].obtenido_en, a["historico"].fuente, "historico")
+        ui_metricas.render(a["fundamentales"], a["indicadores"])
+        ui.frescura(a["info"].obtenido_en if a["info"].ok else None,
+                    "yfinance (fundamentales: info + estados financieros)", "info")
 
 
 def _bloque_anotaciones(a: dict) -> None:
@@ -212,10 +268,7 @@ def _bloque_anotaciones(a: dict) -> None:
         c_btn, c_msg = st.columns([1, 3])
         with c_btn:
             if st.button("Guardar nota", key=f"guardar_nota_{ticker}", width="stretch"):
-                if db_supabase.guardar_anotacion(ticker, texto):
-                    st.session_state[f"nota_guardada_{ticker}"] = True
-                else:
-                    st.session_state[f"nota_guardada_{ticker}"] = False
+                st.session_state[f"nota_guardada_{ticker}"] = db_supabase.guardar_anotacion(ticker, texto)
         with c_msg:
             estado = st.session_state.pop(f"nota_guardada_{ticker}", None)
             if estado is True:
@@ -250,12 +303,12 @@ def render() -> None:
     with c4:
         _bloque_pendiente("Salud / Calidad Fundamental y Valor Objetivo",
                           "Motor de Calidad 0-100 (3 bloques) y Fair Value por múltiplos con "
-                          "sensibilidad y bandas de alerta. Sesión 2.")
+                          "sensibilidad y bandas de alerta. Próxima sesión.")
     with c5:
         _bloque_pendiente("Valoración del Timing y Señal de Entrada",
                           "Puntuación 0-100 en 5 familias y señal ENTRAR / ACUMULAR / VIGILAR / "
-                          "ESPERAR / EVITAR. Sesión 3.")
+                          "ESPERAR / EVITAR.")
     with c6:
         _bloque_pendiente("Plan de inversión DCA y Valoración Final",
                           "Motor de confluencia (3 entradas, 3 salidas, stop sobre coste medio), "
-                          "veredicto, narrativa, invalidación y botón «Guardar en Paper Trading». Sesión 3.")
+                          "veredicto, narrativa, invalidación y botón «Guardar en Paper Trading».")

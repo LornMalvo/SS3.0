@@ -22,6 +22,7 @@ import yfinance as yf
 from config_settings import (
     CARTERA_DIVISA_BASE,
     CARTERA_DIVISAS_CONVERTIBLES,
+    TTL_ESTADOS_FINANCIEROS,
     TTL_FX,
     TTL_HISTORICO_RESPALDO,
     TTL_INFO,
@@ -174,3 +175,24 @@ def obtener_precios_lote(tickers: tuple[str, ...], cubo: str) -> Dato:
         return Dato(resultado, "yfinance", _ahora())
     except Exception:
         return Dato({}, "yfinance", _ahora())
+
+
+@st.cache_data(ttl=TTL_ESTADOS_FINANCIEROS, show_spinner=False)
+def obtener_estados_financieros(ticker: str) -> Dato:
+    """Cuenta de resultados, balance y flujo de caja anuales + cuenta
+    trimestral. Solo cambian 4 veces al año: TTL de 48 h. Los usa el panel de
+    fundamentales (ROIC, ingresos del último trimestre) y, después, el motor
+    de Calidad, sin volver a pedirlos."""
+    try:
+        t = yf.Ticker(ticker)
+        estados = {
+            "resultados": t.income_stmt,
+            "balance": t.balance_sheet,
+            "flujo_caja": t.cashflow,
+            "resultados_trim": t.quarterly_income_stmt,
+        }
+        if all(df is None or df.empty for df in estados.values()):
+            return Dato(None, "yfinance", _ahora())
+        return Dato(estados, "yfinance", _ahora())
+    except Exception:
+        return Dato(None, "yfinance", _ahora())
