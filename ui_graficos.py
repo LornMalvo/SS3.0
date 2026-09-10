@@ -1,8 +1,9 @@
 """Gráficos Plotly. Solo dibujan: no piden datos.
 
 Diseño del gráfico de cotización:
-- Velas y línea son dos trazas con entrada en la leyenda; la línea arranca
-  oculta (`legendonly`). Pulsar en la leyenda activa/desactiva cualquiera.
+- Línea y velas son dos trazas con entrada en la leyenda. La LÍNEA es la
+  vista por defecto en todos los rangos (1D a MAX) y las velas arrancan
+  ocultas (`legendonly`): pulsar en la leyenda activa/desactiva cualquiera.
 - MM50/MM100/MM200 se calculan sobre el histórico COMPLETO y luego se recorta
   al rango visible: si se calcularan sobre el recorte, los primeros 200 días
   de cualquier rango saldrían vacíos.
@@ -51,15 +52,15 @@ def grafico_precio_macd(df_completo: pd.DataFrame, inicio: pd.Timestamp | None =
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03,
                         row_heights=list(GRAFICO_PROPORCION_FILAS))
 
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["Close"], mode="lines", name="Línea",
+        line=dict(color=C_PRIMARIO, width=1.6), legendrank=1,
+        hovertemplate="Cierre: %{y:,.2f}<extra></extra>",
+    ), row=1, col=1)
     fig.add_trace(go.Candlestick(
         x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
         name="Velas", increasing_line_color=C_VERDE, decreasing_line_color=C_ROJO,
-        legendgroup="precio", legendrank=1,
-    ), row=1, col=1)
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["Close"], mode="lines", name="Línea", visible="legendonly",
-        line=dict(color=C_PRIMARIO, width=1.6), legendrank=2,
-        hovertemplate="Cierre: %{y:,.2f}<extra></extra>",
+        legendgroup="precio", legendrank=2, visible="legendonly",
     ), row=1, col=1)
     # Volumen: traza invisible que solo aporta su línea al tooltip unificado.
     fig.add_trace(go.Scatter(
@@ -103,7 +104,8 @@ def grafico_precio_macd(df_completo: pd.DataFrame, inicio: pd.Timestamp | None =
 
 
 def _capa_plan(fig: go.Figure, plan: dict) -> None:
-    """Líneas horizontales del plan DCA sobre la fila de precio."""
+    """Líneas horizontales del plan DCA sobre la fila de precio: entradas en
+    azul, salidas en verde y stop en rojo (colores de config_settings)."""
     def linea(precio, color, etiqueta):
         fig.add_hline(y=precio, line=dict(color=color, width=1.3), row=1, col=1,
                       annotation_text=etiqueta, annotation_position="top left",

@@ -11,7 +11,7 @@ APP_CLAIM = "Tu análisis del mercado"
 # Se guarda junto a cada análisis persistido. Si cambia un peso o un umbral
 # de cualquier motor, se sube la versión: así el backtesting sabe qué
 # parámetros produjeron cada señal pasada y puede reconstruirla.
-MOTOR_VERSION = "0.1.0"
+MOTOR_VERSION = "0.2.0"   # 0.2.0: entran Timing, Confluencia, Plan DCA y veredicto
 
 # ---------------------------------------------------------------- paleta ----
 C_PRIMARIO = "#004e64"
@@ -280,10 +280,93 @@ VEREDICTOS = {
 VEREDICTO_UPSIDE_MIN = 5.0     # % mínimo para considerar compra
 VEREDICTO_UPSIDE_REDUCIR = -20.0
 
+# Tramos 0-100 de cada componente del Timing (interpolación lineal, ver
+# core_ponderar.puntuar_tramos). Orientación: ¿es buen momento para COMPRAR?
+# - RSI: la sobreventa puntúa alto, pero un RSI < 20 es cuchillo cayendo y
+#   se recorta; la sobrecompra puntúa bajo.
+# - MACD: histograma normalizado por ATR (independiente del precio).
+# - OBV: pendiente de 20 sesiones normalizada por volumen medio (acumulación
+#   positiva confirma; distribución penaliza).
+# - Medias: estar por encima es sano, pero muy por encima es extensión.
+# - ATH: un descuento moderado sobre máximos es mejor entrada que el máximo
+#   mismo; un descuento del 70 % ya es sospecha, no oportunidad.
+# - Upside/PEG: el margen de precio; salud: la nota de Calidad tal cual.
+# - Earnings: entrar a < 10 días de resultados es riesgo binario.
+# - Confluencia: distancia a E1 en ATR (cerca de la zona = momento de actuar).
+TIMING_TRAMOS = {
+    "rsi": [(15, 65), (25, 95), (35, 100), (50, 70), (60, 55), (70, 30), (85, 0)],
+    "macd": [(-1.0, 0), (-0.3, 25), (0.0, 50), (0.3, 75), (1.0, 100)],
+    "obv": [(-1.0, 0), (-0.3, 30), (0.0, 50), (0.3, 70), (1.0, 100)],
+    "mm50": [(-25, 20), (-10, 40), (0, 60), (3, 80), (10, 100), (20, 70), (40, 40)],
+    "mm100": [(-25, 20), (-10, 40), (0, 60), (3, 80), (10, 100), (25, 70), (50, 40)],
+    "mm200": [(-30, 15), (-10, 40), (0, 65), (5, 85), (15, 100), (30, 70), (60, 40)],
+    "ath_atl": [(-70, 50), (-40, 80), (-20, 90), (-10, 75), (-3, 55), (0, 45)],
+    "variacion_1a": [(-60, 30), (-30, 60), (-10, 75), (0, 70), (20, 65), (50, 45), (100, 25)],
+    "upside": [(-30, 0), (-5, 25), (5, 50), (15, 70), (35, 90), (60, 100)],
+    "peg": [(0.5, 100), (1.0, 85), (1.5, 60), (2.0, 40), (3.0, 15), (4.0, 0)],
+    "proximidad_earnings": [(0, 15), (10, 20), (20, 55), (30, 75), (60, 90), (120, 90)],
+    "confluencia_dca": [(0, 100), (1, 85), (2, 65), (4, 40), (8, 15)],
+    "volumen_relativo": [(0.5, 40), (1.0, 55), (1.5, 75), (2.5, 90)],
+}
+TIMING_FAMILIAS = {
+    "Momentum y flujo": ("rsi", "macd", "obv", "adx"),
+    "Estructura de precio": ("mm50", "mm100", "mm200", "ath_atl", "variacion_1a"),
+    "Valoración": ("upside", "peg"),
+    "Calidad": ("salud_fundamental",),
+    "Contexto": ("proximidad_earnings", "confluencia_dca", "volumen_relativo"),
+}
+TIMING_OBV_SESIONES = 20
+TIMING_VOLUMEN_DISTRIBUCION = 25   # puntos si el volumen sube con precio cayendo (distribución)
+
 INDICADOR_VENTANAS = {"mm50": 50, "mm100": 100, "mm200": 200, "atr": 14, "rsi": 14, "adx": 14}
 MACD_PARAMS = (12, 26, 9)
 TIMING_VOLUMEN_SESIONES = 5      # ventana corta vs media de 3 meses
 TIMING_EARNINGS_DIAS_CERCA = 10  # a menos de esto se penaliza entrar (riesgo binario)
+
+# ========================================================= INTERPRETACIÓN ====
+# Umbrales del semáforo verde/rojo del panel de métricas y de las lecturas
+# en texto (zona del RSI, fuerza del ADX, sentimiento por short interest).
+# Lo que no cae en verde ni en rojo se deja en neutro: un dato "normal" no
+# debe gritar. Las métricas con referencia sectorial se juzgan por cociente
+# frente al sector; las absolutas, por estos tramos.
+RSI_ZONAS = [   # (límite superior, etiqueta, semáforo) — la última es abierta
+    (30, "Sobreventa", "bien"),
+    (40, "Zona baja, cerca de sobreventa", "bien"),
+    (60, "Zona neutra", None),
+    (70, "Zona alta, cerca de sobrecompra", "mal"),
+    (101, "Sobrecompra", "mal"),
+]
+ADX_FUERZA = [  # (límite superior, etiqueta)
+    (20, "sin tendencia definida (rango lateral)"),
+    (25, "tendencia débil"),
+    (40, "tendencia fuerte"),
+    (101, "tendencia muy fuerte"),
+]
+ADX_TENDENCIA_MIN = 25          # por debajo, la dirección de +DI/-DI no se considera fiable
+SHORT_INTEREST_TRAMOS = [   # (límite superior, etiqueta, semáforo) sobre el % del float
+    (0.03, "muy bajo: sin presión bajista relevante", "bien"),
+    (0.08, "moderado: escepticismo contenido", None),
+    (0.15, "elevado: el mercado apuesta en contra; volatilidad probable", "mal"),
+    (1.01, "muy alto: fuerte sentimiento bajista, riesgo binario (posible short squeeze)", "mal"),
+]
+SHORT_RATIO_SQUEEZE = 5.0   # días para cubrir a partir de los cuales un squeeze es plausible
+# Cociente valor / referencia sectorial. "Menor mejor" (múltiplos): verde por
+# debajo del primero, rojo por encima del segundo. "Mayor mejor" (márgenes,
+# retornos): al revés. La franja intermedia queda neutra.
+SEMAFORO_RATIO_MENOR_MEJOR = (0.85, 1.25)
+SEMAFORO_RATIO_MAYOR_MEJOR = (0.80, 1.20)
+# Umbrales absolutos para métricas sin referencia sectorial.
+SEMAFORO_ABSOLUTO = {         # clave: (verde si <=, rojo si >=)  o  (verde si >=, rojo si <=)
+    "per_trailing": ("menor", 15.0, 35.0),
+    "precio_ventas": ("menor", 2.0, 8.0),
+    "precio_valor_contable": ("menor", 2.0, 8.0),
+    "margen_ebitda": ("mayor", 0.20, 0.05),
+    "roa": ("mayor", 0.08, 0.02),
+    "current_ratio": ("mayor", 1.5, 1.0),
+    "deuda_patrimonio": ("menor", 0.5, 1.5),
+    "short_ratio": ("menor", 3.0, 7.0),
+    "beta": ("menor", 1.0, 1.8),
+}
 
 # ============================================================ CONFLUENCIA ====
 # Pesos de cada candidato a soporte/resistencia. El orden expresa fiabilidad:
@@ -324,6 +407,7 @@ VP_VALUE_AREA_PCT = 0.70
 DIAGONAL_MIN_TOQUES = 3
 DIAGONAL_TOLERANCIA_ATR = 0.75
 DIAGONAL_SESIONES = 378
+DIAGONAL_MAX_POR_LADO = 3        # directrices que sobreviven por lado: las de más toques
 GAP_MIN_PCT = 0.02               # huecos menores son ruido de apertura
 NIVEL_REDONDO_MAX = 3
 
@@ -408,7 +492,10 @@ FRESCURA_ESPERADA = {
 NOTICIAS_N = 5
 NOTICIAS_DIAS = 30            # ventana hacia atrás para company-news
 EARNINGS_TRIMESTRES = 4       # racha de sorpresas mostrada (un año completo)
-EARNINGS_DIAS_ATRAS = 400     # ventana del calendario: ~4 trimestres pasados
+# Ventana del calendario: ~4 trimestres pasados. Se queda por debajo de un
+# año porque el plan gratuito de Finnhub restringe el histórico anterior a
+# 12 meses y una ventana que lo cruza puede rechazarse entera.
+EARNINGS_DIAS_ATRAS = 360
 EARNINGS_DIAS_ADELANTE = 120  # ... y el próximo
 
 MERCADO_ZONA_HORARIA = "America/New_York"

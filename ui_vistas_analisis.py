@@ -18,13 +18,18 @@ import pandas as pd
 import streamlit as st
 
 import core_calidad
+import core_confluencia
 import core_fair_value
 import core_fundamentales
 import core_indicadores
+import core_plan_dca
+import core_timing
 import datos_finnhub
 import datos_traduccion
 import db_supabase
 import ui_bloque_calidad_fv
+import ui_bloque_plan
+import ui_bloque_timing
 import ui_componentes as ui
 import ui_graficos
 import ui_metricas
@@ -52,8 +57,11 @@ CLAVE_TICKER_PENDIENTE = "ticker_pendiente"   # lo rellena Favoritos/Rastreador
 
 # ----------------------------------------------------------------- análisis --
 def analizar(ticker: str) -> dict | None:
-    """Ejecuta el análisis completo. Los motores (sesiones 2-3) añadirán sus
-    claves aquí a partir de `fundamentales`, `estados` e `indicadores`."""
+    """Ejecuta el análisis completo. Orden de los motores: Calidad -> Fair
+    Value -> Confluencia -> Plan DCA (necesita el FV para S3) -> Timing
+    (necesita el plan para la cercanía a E1 y los earnings para el riesgo
+    binario) -> veredicto (calidad, upside y timing) -> narrativa e
+    invalidación."""
     ticker = ticker.strip().upper()
     if not ticker:
         return None
@@ -70,6 +78,11 @@ def analizar(ticker: str) -> dict | None:
     precio_ref = (precio.valor or {}).get("precio") or indicadores.get("precio")
     calidad = core_calidad.calcular(fund, estados.valor)
     fair_value = core_fair_value.calcular(fund, estados.valor, historico.valor, precio_ref, calidad["perfil"])
+    earnings = datos_finnhub.obtener_earnings(ticker)
+    confluencia = core_confluencia.calcular(historico.valor, indicadores, precio_ref)
+    plan = core_plan_dca.plan(confluencia, indicadores, precio_ref, fair_value.get("fair_value"))
+    timing = core_timing.calcular(historico.valor, indicadores, fund, calidad, fair_value, earnings.valor, plan)
+    veredicto = core_plan_dca.veredicto(calidad.get("nota"), fair_value.get("upside_pct"), timing.get("nota"))
     a = {
         "ticker": ticker,
         "cubo": cubo,
@@ -78,13 +91,18 @@ def analizar(ticker: str) -> dict | None:
         "estados": estados,
         "precio": precio,
         "noticias": datos_finnhub.obtener_noticias(ticker),
-        "earnings": datos_finnhub.obtener_earnings(ticker),
+        "earnings": earnings,
         "fundamentales": fund,
         "indicadores": indicadores,
         "calidad": calidad,
         "fair_value": fair_value,
-        "timing": None,        # sesión 3
-        "plan": None,          # sesión 3
+        "confluencia": confluencia,
+        "plan": plan,
+        "timing": timing,
+        "veredicto": veredicto,
+        "narrativa": core_plan_dca.narrativa(ticker, calidad, fair_value, timing, plan, veredicto,
+                                             fund.get("divisa_cotizacion") or ""),
+        "invalidacion": core_plan_dca.invalidacion(calidad, fair_value, plan, earnings.valor),
     }
     db_supabase.guardar_analisis(_fila_historico(a))
     return a
@@ -95,7 +113,7 @@ def _fila_historico(a: dict) -> dict:
     `entradas` guarda los fundamentales crudos: con ellos y la versión del
     motor la nota es reconstruible."""
     from datetime import date
-    fv, cal = a["fair_value"], a["calidad"]
+    fv, cal, t, p = a["fair_value"], a["calidad"], a.get("timing") or {}, a.get("plan")
     return {
         "ticker": a["ticker"],
         "fecha_analisis": date.today().isoformat(),
@@ -105,8 +123,13 @@ def _fila_historico(a: dict) -> dict:
         "calidad": cal.get("nota"),
         "fair_value": fv.get("fair_value"),
         "upside_pct": fv.get("upside_pct"),
+        "timing": t.get("nota"),
+        "senal_timing": t["senal"][0] if t.get("senal") else None,
+        "veredicto": (a.get("veredicto") or {}).get("etiqueta"),
         "perfil": cal.get("perfil"),
-        "cobertura": {"calidad": cal.get("cobertura"), "fair_value": fv.get("cobertura")},
+        "cobertura": {"calidad": cal.get("cobertura"), "fair_value": fv.get("cobertura"), "timing": t.get("cobertura")},
+        "plan": ({"entradas": [(e["nivel"], e["precio"]) for e in p["entradas"]],
+                  "salidas": [(s["nivel"], s["precio"]) for s in p["salidas"]], "stop": p["stop"]} if p else None),
         "entradas": {k: v for k, v in a["fundamentales"].items() if isinstance(v, (int, float, str)) or v is None},
     }
 
@@ -196,7 +219,7 @@ def _noticias(a: dict) -> None:
     st.markdown('<div class="ss-racha-tit">Últimas noticias</div>', unsafe_allow_html=True)
     noticias = a["noticias"].valor
     if not noticias:
-        ui.nd("Sin noticias disponibles (Finnhub cubre principalmente valores de EE. UU.)")
+        ui.nd(f"Sin noticias disponibles ({ui.escapar(a['noticias'].fuente)})")
         return
     for n in noticias:
         st.markdown(
@@ -212,15 +235,17 @@ def _earnings(a: dict) -> None:
     e = a["earnings"].valor
     divisa = a["fundamentales"].get("divisa")
     if not e or not e.get("pasados"):
-        ui.nd("Resultados vs. consenso no disponibles")
+        ui.nd(f"Resultados vs. consenso no disponibles ({ui.escapar(a['earnings'].fuente)})")
     else:
         ultimo = e["pasados"][0]
+        s = ultimo["eps_sorpresa_pct"]
         ui.metrica(f"BPA {ultimo['fecha']:%m/%Y}",
                    f"{ui.fmt_num(ultimo['eps_real'])} vs {ui.fmt_num(ultimo['eps_est'])}",
-                   ui.fmt_pct(ultimo["eps_sorpresa_pct"]))
-        ui.metrica("Ingresos",
-                   f"{ui.fmt_importe(ultimo['rev_real'], divisa)} vs {ui.fmt_grande(ultimo['rev_est'])}",
-                   ui.fmt_pct(ultimo["rev_sorpresa_pct"]))
+                   ui.fmt_pct(s), semaforo="bien" if es_dato(s) and s >= 0 else "mal" if es_dato(s) else None)
+        if es_dato(ultimo.get("rev_real")) or es_dato(ultimo.get("rev_est")):   # Yahoo no da ingresos pasados
+            ui.metrica("Ingresos",
+                       f"{ui.fmt_importe(ultimo['rev_real'], divisa)} vs {ui.fmt_grande(ultimo['rev_est'])}",
+                       ui.fmt_pct(ultimo["rev_sorpresa_pct"]))
         _racha(e["pasados"][:EARNINGS_TRIMESTRES])
     proximo = (e or {}).get("proximo")
     if proximo:
@@ -252,7 +277,8 @@ def _bloque_contexto(a: dict) -> None:
         st.markdown("")
         _noticias(a)
         _earnings(a)
-        ui.frescura(a["noticias"].obtenido_en, "yfinance + finnhub", "noticias")
+        fuente = a["noticias"].fuente if a["noticias"].ok else "yfinance"
+        ui.frescura(a["noticias"].obtenido_en, fuente.split(" (")[0] + " + yfinance", "noticias")
 
 
 # ---------------------------------------------------------- bloque 3: gráfico --
@@ -279,12 +305,12 @@ def _bloque_grafico(a: dict) -> None:
         with c_toggle:
             mostrar_plan = st.toggle("Plan DCA", value=False, key="toggle_plan",
                                      disabled=a.get("plan") is None,
-                                     help="Superpone entradas, salidas y stop del plan (sesión 3)")
+                                     help="Superpone las 3 entradas (azul), 3 salidas (verde) y el stop (rojo) del plan")
         df, inicio, con_medias = _serie_para_rango(a, rango or RANGO_GRAFICO_DEFECTO)
         fig = ui_graficos.grafico_precio_macd(df, inicio, con_medias, a.get("plan"), mostrar_plan, _divisa(a))
         st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
-        st.markdown('<div class="ss-anotacion">Pulsa en la leyenda para mostrar u ocultar velas, línea '
-                    'y medias móviles.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="ss-anotacion">Línea de cierre por defecto; pulsa en la leyenda para '
+                    'mostrar u ocultar velas, línea y medias móviles.</div>', unsafe_allow_html=True)
 
         ui_metricas.render(a["fundamentales"], a["indicadores"])
         ui.frescura(a["info"].obtenido_en if a["info"].ok else None,
@@ -311,11 +337,6 @@ def _bloque_anotaciones(a: dict) -> None:
                 st.caption("No se pudo guardar la nota")
 
 
-def _bloque_pendiente(titulo: str, detalle: str) -> None:
-    with ui.tarjeta(titulo):
-        ui.pendiente(detalle)
-
-
 # ------------------------------------------------------------------- render --
 def render() -> None:
     _formulario()
@@ -337,10 +358,6 @@ def render() -> None:
     with c4:
         ui_bloque_calidad_fv.render(a)
     with c5:
-        _bloque_pendiente("Valoración del Timing y Señal de Entrada",
-                          "Puntuación 0-100 en 5 familias y señal ENTRAR / ACUMULAR / VIGILAR / "
-                          "ESPERAR / EVITAR.")
+        ui_bloque_timing.render(a)
     with c6:
-        _bloque_pendiente("Plan de inversión DCA y Valoración Final",
-                          "Motor de confluencia (3 entradas, 3 salidas, stop sobre coste medio), "
-                          "veredicto, narrativa, invalidación y botón «Guardar en Paper Trading».")
+        ui_bloque_plan.render(a)

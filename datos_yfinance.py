@@ -22,12 +22,15 @@ import yfinance as yf
 from config_settings import (
     CARTERA_DIVISA_BASE,
     CARTERA_DIVISAS_CONVERTIBLES,
+    NOTICIAS_N,
+    TTL_EARNINGS,
     TTL_ESTADOS_FINANCIEROS,
     TTL_FX,
     TTL_HISTORICO_RESPALDO,
     TTL_INFO,
     TTL_INTRADIA,
     TTL_LOTE,
+    TTL_NOTICIAS,
     TTL_PRECIO,
 )
 from core_ponderar import es_dato
@@ -196,3 +199,74 @@ def obtener_estados_financieros(ticker: str) -> Dato:
         return Dato(estados, "yfinance", _ahora())
     except Exception:
         return Dato(None, "yfinance", _ahora())
+
+
+# --------------------------------------------- respaldo de Finnhub (Bloque 2) --
+# Yahoo sirve noticias y calendario de resultados para cualquier mercado, no
+# solo EE. UU.; Finnhub sigue siendo la fuente principal porque aporta los
+# ingresos frente a consenso, que Yahoo no da para trimestres pasados.
+@st.cache_data(ttl=TTL_NOTICIAS, show_spinner=False)
+def obtener_noticias_yf(ticker: str) -> Dato:
+    """Últimas N noticias en el mismo formato que datos_finnhub:
+    [{fecha, titular, fuente, url}], más reciente primero."""
+    try:
+        crudas = yf.Ticker(ticker).news or []
+    except Exception:
+        return Dato(None, "yfinance", _ahora())
+    noticias, vistos = [], set()
+    for n in crudas:
+        c = n.get("content") or n          # yfinance >= 0.2.50 anida en "content"
+        titular = (c.get("title") or "").strip()
+        url = ((c.get("canonicalUrl") or {}).get("url") or (c.get("clickThroughUrl") or {}).get("url")
+               or n.get("link"))
+        if not titular or titular in vistos or not url:
+            continue
+        fecha_txt = c.get("pubDate") or c.get("displayTime")
+        try:
+            fecha = pd.Timestamp(fecha_txt).date() if fecha_txt else datetime.fromtimestamp(
+                n.get("providerPublishTime", 0), tz=timezone.utc).date()
+        except Exception:
+            continue
+        vistos.add(titular)
+        noticias.append({"fecha": fecha, "titular": titular,
+                         "fuente": (c.get("provider") or {}).get("displayName") or n.get("publisher") or "",
+                         "url": url})
+    noticias.sort(key=lambda x: x["fecha"], reverse=True)
+    return Dato(noticias[:NOTICIAS_N] or None, "yfinance", _ahora())
+
+
+@st.cache_data(ttl=TTL_EARNINGS, show_spinner=False)
+def obtener_earnings_yf(ticker: str) -> Dato:
+    """Calendario de resultados desde `earnings_dates` + `calendar`, en el
+    formato de datos_finnhub. Sin ingresos reales por trimestre (Yahoo no los
+    publica aquí): esas claves salen None y la vista las omite."""
+    try:
+        t = yf.Ticker(ticker)
+        ed = t.get_earnings_dates(limit=12)
+        cal = t.calendar or {}
+    except Exception:
+        return Dato(None, "yfinance", _ahora())
+    if ed is None or ed.empty:
+        return Dato(None, "yfinance", _ahora())
+    hoy = pd.Timestamp.now(tz="UTC").date()
+    pasados, futuros = [], []
+    for fecha_ts, fila in ed.iterrows():
+        fecha = fecha_ts.date()
+        real, est = fila.get("Reported EPS"), fila.get("EPS Estimate")
+        if es_dato(real):
+            pasados.append({
+                "fecha": fecha, "eps_real": float(real), "eps_est": float(est) if es_dato(est) else None,
+                "eps_sorpresa_pct": (float(real) - float(est)) / abs(float(est)) * 100 if es_dato(est) and est else None,
+                "rev_real": None, "rev_est": None, "rev_sorpresa_pct": None,
+            })
+        elif fecha >= hoy:
+            futuros.append((fecha, float(est) if es_dato(est) else None))
+    pasados.sort(key=lambda x: x["fecha"], reverse=True)
+    proximo = None
+    if futuros:
+        fecha, est = min(futuros)
+        rev = cal.get("Revenue Average")
+        proximo = {"fecha": fecha, "eps_est": est, "rev_est": float(rev) if es_dato(rev) else None, "hora": None}
+    if not pasados and proximo is None:
+        return Dato(None, "yfinance", _ahora())
+    return Dato({"pasados": pasados[:4], "proximo": proximo}, "yfinance", _ahora())

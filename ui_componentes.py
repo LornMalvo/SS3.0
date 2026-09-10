@@ -7,10 +7,13 @@ from datetime import datetime
 
 import streamlit as st
 
-from config_settings import C_TEXTO_TENUE, FRESCURA_ESPERADA, TEXTO_ND
+from config_settings import C_ROJO, C_TEXTO_TENUE, C_VERDE, FRESCURA_ESPERADA, TEXTO_ND
 from core_ponderar import es_dato
 from datos_cache import antiguedad_seg
 from datos_yfinance import convertir_a_eur
+
+# Color del valor de una métrica según su lectura (core_interpretar.SEMAFORO).
+COLOR_SEMAFORO = {"bien": C_VERDE, "mal": C_ROJO}
 
 
 @contextmanager
@@ -23,9 +26,15 @@ def tarjeta(titulo: str | None = None):
 
 
 def escapar(texto: str) -> str:
-    """Streamlit interpreta pares de `$` como LaTeX: se escapan siempre en
-    texto dinámico (convención del proyecto)."""
-    return (texto or "").replace("$", r"\$")
+    """Streamlit interpreta pares de `$` como LaTeX, así que el símbolo se
+    neutraliza siempre en texto dinámico (convención del proyecto).
+
+    Se usa la entidad HTML `&#36;` y no la barra `\\$`: dentro de un bloque
+    HTML (todo lo que pintamos con unsafe_allow_html) Markdown no procesa
+    escapes, así que la barra se mostraba literalmente ("207,17 \\$"). La
+    entidad la resuelve el navegador en ambos contextos y nunca dispara
+    LaTeX."""
+    return (texto or "").replace("$", "&#36;")
 
 
 def fmt_num(valor, decimales: int = 2, sufijo: str = "") -> str:
@@ -79,12 +88,24 @@ def fmt_precio(valor, divisa: str | None, decimales: int = 2) -> str:
     return f"{base} ({fmt_num(eur, decimales)} €)" if eur is not None else f"{base} (EUR {TEXTO_ND.lower()})"
 
 
-def metrica(etiqueta: str, valor: str, referencia: str | None = None) -> None:
+def metrica(etiqueta: str, valor: str, referencia: str | None = None, semaforo: str | None = None) -> None:
+    """Fila etiqueta / valor. `semaforo` ("bien" | "mal" | None) colorea el
+    valor en verde o rojo; sin lectura clara se deja en el color del texto."""
     ref = f'<span class="ss-media-sector">{referencia}</span>' if referencia else ""
+    color = COLOR_SEMAFORO.get(semaforo or "")
+    estilo = f' style="color:{color}"' if color else ""
     st.markdown(
-        f'<div class="ss-metrica"><span>{etiqueta}</span><span>{escapar(valor)}{ref}</span></div>',
+        f'<div class="ss-metrica"><span>{etiqueta}</span><span{estilo}>{escapar(valor)}{ref}</span></div>',
         unsafe_allow_html=True,
     )
+
+
+def lectura(texto: str, semaforo: str | None = None) -> None:
+    """Frase de interpretación bajo una métrica (zona del RSI, tendencia del
+    ADX, sentimiento...). El borde izquierdo toma el color del semáforo."""
+    color = COLOR_SEMAFORO.get(semaforo or "", C_TEXTO_TENUE)
+    st.markdown(f'<div class="ss-lectura" style="border-left-color:{color}">{escapar(texto)}</div>',
+                unsafe_allow_html=True)
 
 
 def badge(texto: str, color: str) -> str:

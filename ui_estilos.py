@@ -149,6 +149,12 @@ div[data-testid="stVerticalBlockBorderWrapper"] > div {{ border-radius: 18px; }}
 }}
 .ss-metrica span:first-child {{ color: var(--ss-tenue); }}
 .ss-metrica span:last-child {{ font-weight: 600; font-variant-numeric: tabular-nums; }}
+/* Frase de interpretación bajo una métrica (RSI, ADX, short interest). */
+.ss-lectura {{
+  font-size: .76rem; line-height: 1.35; margin: .25rem 0 .45rem;
+  padding: .3rem .55rem; border-left: 3px solid var(--ss-tenue);
+  background: #f1f5f9; border-radius: 0 6px 6px 0;
+}}
 .ss-media-sector {{
   color: var(--ss-tenue); font-weight: 400; font-size: .74rem; margin-left: .5rem;
 }}
