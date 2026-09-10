@@ -113,6 +113,40 @@ assert sum(CALIDAD_PESOS.values()) == 100
 # inventa una empresa. Se muestra "Dato no disponible" con la cobertura real.
 CALIDAD_COBERTURA_MINIMA = 0.50
 
+# Tramos de puntuación de cada métrica: [(valor, puntos), ...] interpolados
+# linealmente (core_ponderar.puntuar_tramos). Fuera del rango se satura.
+# Las métricas RELATIVAS se puntúan por su cociente frente a la mediana del
+# sector: 0,5x -> 25, 1x -> 60, 1,5x -> 85, 2x -> 100. Igualar al sector vale
+# 60 y no 50 porque una empresa mediana de su sector sigue siendo un negocio
+# viable; el 50 se reserva para "por debajo de la referencia".
+CALIDAD_TRAMOS_RELATIVOS = [(0.0, 0), (0.5, 25), (1.0, 60), (1.5, 85), (2.0, 100)]
+CALIDAD_METRICAS_RELATIVAS = {"roic", "margen_bruto", "margen_operativo", "roe"}
+CALIDAD_TRAMOS = {
+    "cagr_ingresos_3a": [(-0.10, 0), (0.0, 25), (0.05, 50), (0.10, 70), (0.20, 90), (0.30, 100)],
+    "cagr_bpa_3a": [(-0.10, 0), (0.0, 25), (0.05, 50), (0.12, 75), (0.25, 100)],
+    "consistencia_ingresos": [(0.0, 0), (0.5, 40), (1.0, 100)],
+    "crecimiento_fcf": [(-0.15, 0), (0.0, 35), (0.10, 70), (0.25, 100)],
+    "margen_fcf": [(-0.10, 0), (0.0, 30), (0.05, 55), (0.15, 80), (0.25, 100)],
+    "calidad_beneficio": [(0.0, 0), (0.5, 35), (0.8, 65), (1.0, 85), (1.3, 100)],
+    "deuda_neta_ebitda": [(-1.0, 100), (0.0, 90), (1.0, 75), (2.0, 55), (3.0, 35), (4.0, 15), (6.0, 0)],
+    "cobertura_intereses": [(0.0, 0), (1.0, 15), (3.0, 45), (6.0, 70), (10.0, 90), (20.0, 100)],
+    "dilucion": [(-0.10, 100), (-0.03, 85), (0.0, 70), (0.03, 45), (0.10, 15), (0.25, 0)],
+    "current_ratio": [(0.5, 0), (1.0, 40), (1.5, 75), (2.0, 95), (3.0, 100)],
+    "fcf_positivo": [(0.0, 0), (0.34, 30), (0.67, 65), (1.0, 100)],
+    "deuda_patrimonio": [(0.0, 100), (0.5, 80), (1.0, 60), (2.0, 30), (3.0, 0)],
+}
+# Sectores estructuralmente apalancados (Utilities, Real Estate): la misma
+# deuda no es la misma señal. Tramos más laxos para las métricas de deuda.
+CALIDAD_TRAMOS_APALANCADOS = {
+    "deuda_neta_ebitda": [(0.0, 100), (2.0, 80), (4.0, 60), (6.0, 35), (8.0, 10)],
+    "deuda_patrimonio": [(0.0, 100), (1.0, 80), (2.0, 60), (4.0, 30), (6.0, 0)],
+}
+# Financieras: deuda/EBITDA, cobertura de intereses y current ratio no son
+# magnitudes económicas válidas (la deuda ES el negocio). Se excluyen y
+# `ponderar()` redistribuye su peso; la cobertura mostrada lo hace visible.
+CALIDAD_METRICAS_NO_FINANCIERAS = {"deuda_neta_ebitda", "cobertura_intereses", "current_ratio", "deuda_patrimonio"}
+CALIDAD_ANIOS_CRECIMIENTO = 3
+
 # Perfil de empresa: gobierna qué métodos de Fair Value se activan. Es
 # pre_rentabilidad si el BPA TTM y el forward son ambos <= 0.
 PERFIL_RENTABLE = "rentable"
@@ -139,7 +173,10 @@ FV_PESOS_PRE_RENTABILIDAD = {
     "ev_ebitda": 0.20,
     "consenso": 0.35,
 }
+# yfinance solo sirve 4 ejercicios anuales: el PER histórico propio se
+# construye con los que haya (mínimo 3) a partir del cierre de cada ejercicio.
 FV_PER_HISTORICO_ANIOS = 5
+FV_PER_HISTORICO_MIN_ANIOS = 3
 # Si el PER más alto de la serie supera al más bajo en más de este factor, la
 # empresa no tiene un "PER propio" fiable (rampa de crecimiento o cargo
 # puntual) y el método se excluye.
@@ -170,6 +207,10 @@ FV_ESCENARIOS = {
     "base": {"multiplo": 1.00, "crecimiento": 1.00, "consenso": "medio"},
     "optimista": {"multiplo": 1.15, "crecimiento": 1.20, "consenso": "alto"},
 }
+
+# Detección de anomalías: un upside fuera de este rango no se muestra con la
+# confianza habitual, se marca "revisar manualmente".
+FV_UPSIDE_ANOMALIA = (-70.0, 150.0)
 
 # Bandas de valoración: (upside_min, upside_max, etiqueta, color), % sobre el
 # precio. Zona neutra +-5%: la dispersión típica entre métodos es del 20-30%,

@@ -17,17 +17,21 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+import core_calidad
+import core_fair_value
 import core_fundamentales
 import core_indicadores
 import datos_finnhub
 import datos_traduccion
 import db_supabase
+import ui_bloque_calidad_fv
 import ui_componentes as ui
 import ui_graficos
 import ui_metricas
 from config_settings import (
     DIAS_RANGO,
     EARNINGS_TRIMESTRES,
+    MOTOR_VERSION,
     RANGO_GRAFICO_DEFECTO,
     RANGOS_GRAFICO,
     TEXTO_ND,
@@ -59,21 +63,51 @@ def analizar(ticker: str) -> dict | None:
         return None
     info = obtener_info(ticker)
     estados = obtener_estados_financieros(ticker)
-    return {
+    precio = obtener_precio_actual(ticker)
+    fund = core_fundamentales.extraer(info.valor, estados.valor)
+    fund["divisa_cotizacion"] = (precio.valor or {}).get("divisa") or (info.valor or {}).get("currency")
+    indicadores = core_indicadores.resumen(historico.valor)
+    precio_ref = (precio.valor or {}).get("precio") or indicadores.get("precio")
+    calidad = core_calidad.calcular(fund, estados.valor)
+    fair_value = core_fair_value.calcular(fund, estados.valor, historico.valor, precio_ref, calidad["perfil"])
+    a = {
         "ticker": ticker,
         "cubo": cubo,
         "historico": historico,
         "info": info,
         "estados": estados,
-        "precio": obtener_precio_actual(ticker),
+        "precio": precio,
         "noticias": datos_finnhub.obtener_noticias(ticker),
         "earnings": datos_finnhub.obtener_earnings(ticker),
-        "fundamentales": core_fundamentales.extraer(info.valor, estados.valor),
-        "indicadores": core_indicadores.resumen(historico.valor),
-        "calidad": None,       # sesión 2
-        "fair_value": None,    # sesión 2
+        "fundamentales": fund,
+        "indicadores": indicadores,
+        "calidad": calidad,
+        "fair_value": fair_value,
         "timing": None,        # sesión 3
         "plan": None,          # sesión 3
+    }
+    db_supabase.guardar_analisis(_fila_historico(a))
+    return a
+
+
+def _fila_historico(a: dict) -> dict:
+    """Fila para `analisis_historico` (deduplicada por ticker/fecha/versión).
+    `entradas` guarda los fundamentales crudos: con ellos y la versión del
+    motor la nota es reconstruible."""
+    from datetime import date
+    fv, cal = a["fair_value"], a["calidad"]
+    return {
+        "ticker": a["ticker"],
+        "fecha_analisis": date.today().isoformat(),
+        "motor_version": MOTOR_VERSION,
+        "precio": fv.get("precio"),
+        "divisa": a["fundamentales"].get("divisa_cotizacion"),
+        "calidad": cal.get("nota"),
+        "fair_value": fv.get("fair_value"),
+        "upside_pct": fv.get("upside_pct"),
+        "perfil": cal.get("perfil"),
+        "cobertura": {"calidad": cal.get("cobertura"), "fair_value": fv.get("cobertura")},
+        "entradas": {k: v for k, v in a["fundamentales"].items() if isinstance(v, (int, float, str)) or v is None},
     }
 
 
@@ -301,9 +335,7 @@ def render() -> None:
 
     c4, c5, c6 = st.columns(3)
     with c4:
-        _bloque_pendiente("Salud / Calidad Fundamental y Valor Objetivo",
-                          "Motor de Calidad 0-100 (3 bloques) y Fair Value por múltiplos con "
-                          "sensibilidad y bandas de alerta. Próxima sesión.")
+        ui_bloque_calidad_fv.render(a)
     with c5:
         _bloque_pendiente("Valoración del Timing y Señal de Entrada",
                           "Puntuación 0-100 en 5 familias y señal ENTRAR / ACUMULAR / VIGILAR / "
