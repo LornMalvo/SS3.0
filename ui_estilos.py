@@ -158,6 +158,10 @@ div[data-testid="stVerticalBlockBorderWrapper"] > div {{ border-radius: 18px; }}
 .ss-media-sector {{
   color: var(--ss-tenue); font-weight: 400; font-size: .74rem; margin-left: .5rem;
 }}
+/* Referencia coloreada por semáforo (distancia % a una media o a un extremo
+   de 52 semanas): misma posición que la referencia de sector pero con peso
+   para que el color se lea; el dato que la precede queda neutro. */
+.ss-ref-semaforo {{ font-weight: 700; font-size: .78rem; margin-left: .5rem; }}
 
 /* --- ficha compacta de posición (rejilla de Cartera y Paper Trading) --- */
 .ss-mini-cab {{

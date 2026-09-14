@@ -11,7 +11,7 @@ APP_CLAIM = "Tu análisis del mercado"
 # Se guarda junto a cada análisis persistido. Si cambia un peso o un umbral
 # de cualquier motor, se sube la versión: así el backtesting sabe qué
 # parámetros produjeron cada señal pasada y puede reconstruirla.
-MOTOR_VERSION = "0.2.0"   # 0.2.0: entran Timing, Confluencia, Plan DCA y veredicto
+MOTOR_VERSION = "0.2.1"   # 0.2.1: el veredicto REDUCIR se activa con posición abierta (cartera o paper)
 
 # ---------------------------------------------------------------- paleta ----
 C_PRIMARIO = "#004e64"
@@ -450,6 +450,37 @@ CARTERA_DIVISAS_CONVERTIBLES = ("EUR", "USD")
 # quedar un residuo de 1e-14 acciones que dejaría la posición "abierta".
 CARTERA_TOLERANCIA_ACCIONES = 1e-6
 BENCHMARK = "SPY"   # convertido a EUR para compararlo con la cartera
+# Dos costes medios conviven a propósito: el PONDERADO es el que se enseña en
+# la ficha (es lo que el inversor tiene en la cabeza y lo que usa el stop del
+# plan), el FIFO es el que manda en el realizado (criterio fiscal español:
+# las primeras acciones compradas son las primeras que se venden).
+CARTERA_COMISION_DEFECTO = 1.0     # EUR por operación (Trade Republic)
+# Divisa de cotización por sufijo del ticker: cero peticiones para los casos
+# habituales; solo un sufijo desconocido pregunta a fast_info (cacheado 48 h).
+# Sin sufijo = mercado estadounidense = USD.
+SUFIJOS_DIVISA = {
+    "": "USD", ".MC": "EUR", ".DE": "EUR", ".F": "EUR", ".PA": "EUR", ".MI": "EUR", ".AS": "EUR",
+    ".BR": "EUR", ".LS": "EUR", ".VI": "EUR", ".HE": "EUR", ".IR": "EUR", ".L": "GBP", ".SW": "CHF",
+    ".TO": "CAD", ".HK": "HKD", ".T": "JPY", ".ST": "SEK", ".CO": "DKK", ".OL": "NOK",
+}
+# Curva de rendimiento y correlación: UNA descarga por lote (tickers + SPY +
+# pares FX) cacheada por cubo de mercado, desde la operación más antigua o,
+# como mínimo, este número de días; la correlación se calcula sobre el
+# último año.
+CARTERA_HISTORICO_DIAS = 366
+CARTERA_CORRELACION_MIN_SESIONES = 60   # con menos, la correlación es ruido
+CARTERA_CORRELACION_ALTA = 0.75         # a partir de aquí dos posiciones son "la misma apuesta"
+CARTERA_PESO_ALERTA = 0.25              # una posición > 25 % de la cartera se marca
+CARTERA_SECTOR_ALERTA = 0.40            # un sector > 40 % de la cartera se marca
+
+# ---------------------------------------------------------- paper trading ----
+# Capital nominal de cada plan simulado: las entradas E1/E2/E3 reparten este
+# importe con los pesos DCA (40/35/25). Se fija al ejecutar el primer nivel y
+# no vuelve a cambiar, así el rendimiento simulado es comparable entre planes.
+PAPER_CAPITAL_DEFECTO = 1000.0
+PAPER_NIVELES_ENTRADA = ("E1", "E2", "E3")
+PAPER_NIVELES_SALIDA = ("S1", "S2", "S3")
+PAPER_NIVEL_STOP = "STOP"
 
 # ---------------------------------------------------------- paper trading ----
 PAPER_ESTADOS = {

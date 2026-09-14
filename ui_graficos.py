@@ -117,3 +117,68 @@ def _capa_plan(fig: go.Figure, plan: dict) -> None:
         linea(nivel["precio"], PLAN_COLORES_SALIDA[i], f"S{i + 1}")
     if plan.get("stop"):
         linea(plan["stop"], PLAN_COLOR_STOP, "STOP")
+
+
+# ================================================================ CARTERA ====
+def grafico_rendimiento(df: pd.DataFrame, benchmark: str) -> go.Figure:
+    """Curva de valor de la cartera frente a su cartera sombra en el
+    benchmark y el coste vivo (línea punteada): por encima del punteado se
+    gana, por debajo se pierde, y la distancia entre las dos curvas es la
+    diferencia con el índice con el MISMO dinero en las MISMAS fechas."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df.index, y=df["invertido"], name="Coste vivo", mode="lines",
+                             line=dict(color=C_TEXTO_TENUE, width=1, dash="dot"),
+                             hovertemplate="Coste: %{y:,.0f} €<extra></extra>"))
+    fig.add_trace(go.Scatter(x=df.index, y=df["benchmark"], name=f"{benchmark} (sombra)", mode="lines",
+                             line=dict(color=C_AZUL, width=1.4),
+                             hovertemplate=benchmark + ": %{y:,.0f} €<extra></extra>"))
+    fig.add_trace(go.Scatter(x=df.index, y=df["cartera"], name="Cartera", mode="lines",
+                             line=dict(color=C_PRIMARIO, width=2),
+                             hovertemplate="Cartera: %{y:,.0f} €<extra></extra>"))
+    fig.update_layout(
+        height=340, margin=dict(l=10, r=10, t=30, b=10), hovermode="x unified",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", y=1.02, x=0, yanchor="bottom", font=dict(size=10)),
+        font=dict(family="Inter, Segoe UI, system-ui, sans-serif", color=C_TEXTO_TENUE, size=11),
+        hoverlabel=dict(bgcolor="#ffffff", bordercolor="#e2e8f0", font=dict(size=11, color="#0f172a")),
+    )
+    fig.update_yaxes(title_text="EUR", gridcolor="#e2e8f0", zeroline=False)
+    fig.update_xaxes(gridcolor="#e2e8f0", showspikes=True, spikemode="across", spikethickness=1,
+                     spikecolor="#94a3b8", spikedash="dot")
+    return fig
+
+
+def grafico_sectores(exposicion: list[dict]) -> go.Figure:
+    """Barras horizontales de peso por sector; en naranja las que superan
+    el umbral de concentración."""
+    fig = go.Figure(go.Bar(
+        x=[e["peso_pct"] for e in exposicion][::-1], y=[e["sector"] for e in exposicion][::-1],
+        orientation="h", marker_color=[("#f97316" if e["alerta"] else C_AZUL) for e in exposicion][::-1],
+        text=[f'{e["peso_pct"]:.0f} %' for e in exposicion][::-1], textposition="outside",
+        hovertemplate="%{y}: %{x:.1f} %<extra></extra>",
+    ))
+    fig.update_layout(
+        height=max(180, 34 * len(exposicion) + 60), margin=dict(l=10, r=40, t=10, b=10),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Inter, Segoe UI, system-ui, sans-serif", color=C_TEXTO_TENUE, size=11),
+        xaxis=dict(range=[0, 100], showgrid=False, showticklabels=False), yaxis=dict(showgrid=False),
+    )
+    return fig
+
+
+def grafico_correlacion(matriz: pd.DataFrame) -> go.Figure:
+    """Mapa de calor de la correlación de rendimientos diarios (−1 a 1)."""
+    cols = list(matriz.columns)
+    fig = go.Figure(go.Heatmap(
+        z=matriz.values, x=cols, y=cols, zmin=-1, zmax=1,
+        colorscale=[[0, C_ROJO], [0.5, "#f8fafc"], [1, C_AZUL]],
+        text=[[f"{v:.2f}" for v in fila] for fila in matriz.values], texttemplate="%{text}",
+        hovertemplate="%{y} · %{x}: %{z:.2f}<extra></extra>", showscale=False,
+    ))
+    fig.update_layout(
+        height=max(220, 36 * len(cols) + 60), margin=dict(l=10, r=10, t=10, b=10),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Inter, Segoe UI, system-ui, sans-serif", color=C_TEXTO_TENUE, size=11),
+        yaxis=dict(autorange="reversed"),
+    )
+    return fig

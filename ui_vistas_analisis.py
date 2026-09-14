@@ -18,6 +18,7 @@ import pandas as pd
 import streamlit as st
 
 import core_calidad
+import core_cartera
 import core_confluencia
 import core_fair_value
 import core_fundamentales
@@ -82,8 +83,11 @@ def analizar(ticker: str) -> dict | None:
     confluencia = core_confluencia.calcular(historico.valor, indicadores, precio_ref)
     plan = core_plan_dca.plan(confluencia, indicadores, precio_ref, fair_value.get("fair_value"))
     timing = core_timing.calcular(historico.valor, indicadores, fund, calidad, fair_value, earnings.valor, plan)
-    veredicto = core_plan_dca.veredicto(calidad.get("nota"), fair_value.get("upside_pct"), timing.get("nota"))
+    posicion = _posicion_abierta(ticker)
+    veredicto = core_plan_dca.veredicto(calidad.get("nota"), fair_value.get("upside_pct"), timing.get("nota"),
+                                        posicion_abierta=posicion["real"] or posicion["paper"])
     a = {
+        "posicion": posicion,
         "ticker": ticker,
         "cubo": cubo,
         "historico": historico,
@@ -106,6 +110,18 @@ def analizar(ticker: str) -> dict | None:
     }
     db_supabase.guardar_analisis(_fila_historico(a))
     return a
+
+
+def _posicion_abierta(ticker: str) -> dict:
+    """¿Hay posición abierta en el ticker? En la cartera real (acciones > 0
+    en el libro) o en Paper Trading (plan con entradas ejecutadas). Es lo que
+    habilita el veredicto REDUCIR: sin posición no hay nada que reducir."""
+    ops = db_supabase.listar_operaciones("real", ticker)
+    plan = db_supabase.plan_activo_para(ticker)
+    return {
+        "real": core_cartera.disponibles(ops, ticker) > 0,
+        "paper": plan is not None and plan.get("estado") in ("parcial_entrada", "abierta", "parcial_salida"),
+    }
 
 
 def _fila_historico(a: dict) -> dict:

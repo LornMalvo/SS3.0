@@ -17,6 +17,7 @@ from config_settings import (
     PLAN_COLOR_STOP,
     PLAN_COLORES_ENTRADA,
     PLAN_COLORES_SALIDA,
+    VEREDICTO_UPSIDE_REDUCIR,
 )
 from core_ponderar import es_dato
 
@@ -57,6 +58,12 @@ def render(a: dict) -> None:
             st.markdown('<div class="ss-etiqueta">Veredicto</div>', unsafe_allow_html=True)
             ui.alerta(v["etiqueta"], v["color"])
             st.markdown(f'<div class="ss-anotacion">{ui.escapar(v["motivo"])}</div>', unsafe_allow_html=True)
+            pos = a.get("posicion") or {}
+            if pos.get("real") or pos.get("paper"):
+                donde = " y ".join(n for n, ok in (("cartera", pos.get("real")), ("Paper Trading", pos.get("paper"))) if ok)
+                st.markdown(f'<div class="ss-anotacion">Posición abierta en {donde}: el veredicto contempla REDUCIR '
+                            f'si la sobrevaloración supera el {abs(VEREDICTO_UPSIDE_REDUCIR):.0f} %.</div>',
+                            unsafe_allow_html=True)
         if not p:
             ui.nd("Plan no calculable: sin precio o sin histórico suficiente para las zonas de confluencia.")
             return

@@ -111,14 +111,20 @@ def render(fund: dict, ind: dict, ind_extra: dict | None = None) -> None:
         ui.lectura(txt_adx, sem_adx)
 
         ui.metrica("ATR (14)", _ratio(ind.get("atr"), 2), ui.fmt_pct(ind.get("atr_pct"), signo=False))
+        # Niveles de precio (medias y extremos de 52 semanas): se muestran en
+        # su divisa con la conversión a EUR, y el semáforo va sobre la
+        # DISTANCIA del precio al nivel (verde por encima, rojo por debajo),
+        # no sobre el nivel, que en sí no es bueno ni malo.
+        divisa_cot = fund.get("divisa_cotizacion") or divisa
+        nivel = lambda v: ui.fmt_precio(v, divisa_cot)  # noqa: E731
         for etiqueta, clave, dist in (("MM50", "mm50", "dist_mm50"), ("MM100", "mm100", "dist_mm100"),
                                       ("MM200", "mm200", "dist_mm200")):
-            ui.metrica(etiqueta, _ratio(ind.get(clave), 2), ui.fmt_pct(ind.get(dist)),
-                       semaforo=ci.semaforo_encima(ind.get(dist)))
-        ui.metrica("Máximo 52 semanas", _ratio(ind.get("max_52s"), 2),
-                   ui.fmt_pct(_dist(ind.get("precio"), ind.get("max_52s"))))
-        ui.metrica("Mínimo 52 semanas", _ratio(ind.get("min_52s"), 2),
-                   ui.fmt_pct(_dist(ind.get("precio"), ind.get("min_52s"))))
+            ui.metrica(etiqueta, nivel(ind.get(clave)), ui.fmt_pct(ind.get(dist)),
+                       semaforo=ci.semaforo_encima(ind.get(dist)), color_en="referencia")
+        for etiqueta, clave in (("Máximo 52 semanas", "max_52s"), ("Mínimo 52 semanas", "min_52s")):
+            d = _dist(ind.get("precio"), ind.get(clave))
+            ui.metrica(etiqueta, nivel(ind.get(clave)), ui.fmt_pct(d),
+                       semaforo=ci.semaforo_signo(d), color_en="referencia")
         ui.metrica("Variación 1 año", ui.fmt_pct(ind.get("variacion_1a")),
                    semaforo=ci.semaforo_signo(ind.get("variacion_1a")))
         ui.metrica("Volumen medio 3 meses", ui.fmt_grande(fund.get("volumen_medio_3m")))

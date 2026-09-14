@@ -88,14 +88,25 @@ def fmt_precio(valor, divisa: str | None, decimales: int = 2) -> str:
     return f"{base} ({fmt_num(eur, decimales)} €)" if eur is not None else f"{base} (EUR {TEXTO_ND.lower()})"
 
 
-def metrica(etiqueta: str, valor: str, referencia: str | None = None, semaforo: str | None = None) -> None:
-    """Fila etiqueta / valor. `semaforo` ("bien" | "mal" | None) colorea el
-    valor en verde o rojo; sin lectura clara se deja en el color del texto."""
-    ref = f'<span class="ss-media-sector">{referencia}</span>' if referencia else ""
+def metrica(etiqueta: str, valor: str, referencia: str | None = None, semaforo: str | None = None,
+            color_en: str = "valor") -> None:
+    """Fila etiqueta / valor. `semaforo` ("bien" | "mal" | None) colorea en
+    verde o rojo; sin lectura clara se deja en el color del texto.
+
+    `color_en` decide QUÉ se colorea: "valor" (por defecto) tiñe el dato;
+    "referencia" tiñe solo el texto de referencia y deja el dato neutro. Es el
+    caso de las medias móviles y los extremos de 52 semanas: el nivel en sí
+    (4,14 $) no es bueno ni malo, lo que tiene lectura es la distancia del
+    precio a ese nivel (-22,9 %)."""
     color = COLOR_SEMAFORO.get(semaforo or "")
-    estilo = f' style="color:{color}"' if color else ""
+    estilo_valor = f' style="color:{color}"' if color and color_en == "valor" else ""
+    ref = ""
+    if referencia:
+        clase = "ss-ref-semaforo" if color and color_en == "referencia" else "ss-media-sector"
+        estilo_ref = f' style="color:{color}"' if color and color_en == "referencia" else ""
+        ref = f'<span class="{clase}"{estilo_ref}>{escapar(referencia)}</span>'
     st.markdown(
-        f'<div class="ss-metrica"><span>{etiqueta}</span><span{estilo}>{escapar(valor)}{ref}</span></div>',
+        f'<div class="ss-metrica"><span>{etiqueta}</span><span{estilo_valor}>{escapar(valor)}{ref}</span></div>',
         unsafe_allow_html=True,
     )
 

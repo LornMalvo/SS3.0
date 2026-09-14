@@ -20,9 +20,11 @@ import streamlit as st
 import yfinance as yf
 
 from config_settings import (
+    BENCHMARK,
     CARTERA_DIVISA_BASE,
     CARTERA_DIVISAS_CONVERTIBLES,
     NOTICIAS_N,
+    SUFIJOS_DIVISA,
     TTL_EARNINGS,
     TTL_ESTADOS_FINANCIEROS,
     TTL_FX,
@@ -151,6 +153,23 @@ def convertir_a_eur(importe: float | None, divisa: str | None) -> tuple[float | 
     return float(importe) * fx.valor, fx.valor
 
 
+def _columna_cierre(df: pd.DataFrame, simbolo: str) -> pd.Series | None:
+    """Serie de cierres de un símbolo dentro de un `yf.download` por lote.
+    Con group_by="ticker" las columnas son MultiIndex (símbolo, campo)
+    TAMBIÉN cuando se pide un solo ticker (yfinance 1.x), así que se prueba
+    primero esa forma y solo después la plana. None si no hay cierres."""
+    for extraer in (lambda: df[simbolo]["Close"], lambda: df["Close"]):
+        try:
+            serie = extraer().dropna()
+        except Exception:
+            continue
+        if isinstance(serie, pd.DataFrame):      # forma plana con varios símbolos: (campo, símbolo)
+            serie = serie[simbolo].dropna() if simbolo in serie.columns else None
+        if serie is not None and not serie.empty:
+            return serie
+    return None
+
+
 @st.cache_data(ttl=TTL_LOTE, show_spinner=False)
 def obtener_precios_lote(tickers: tuple[str, ...], cubo: str) -> Dato:
     """Una sola descarga para N tickers (Rastreador, Favoritos). Devuelve
@@ -162,11 +181,8 @@ def obtener_precios_lote(tickers: tuple[str, ...], cubo: str) -> Dato:
                          auto_adjust=False, progress=False, threads=True)
         resultado: dict[str, dict] = {}
         for t in tickers:
-            try:
-                serie = (df[t]["Close"] if len(tickers) > 1 else df["Close"]).dropna()
-            except Exception:
-                continue
-            if serie.empty:
+            serie = _columna_cierre(df, t)
+            if serie is None:
                 continue
             precio = float(serie.iloc[-1])
             previo = float(serie.iloc[-2]) if len(serie) > 1 else None
@@ -178,6 +194,100 @@ def obtener_precios_lote(tickers: tuple[str, ...], cubo: str) -> Dato:
         return Dato(resultado, "yfinance", _ahora())
     except Exception:
         return Dato({}, "yfinance", _ahora())
+
+
+@st.cache_data(ttl=TTL_ESTADOS_FINANCIEROS, show_spinner=False)
+def obtener_divisa(ticker: str) -> str | None:
+    """Divisa de cotización de un ticker. Por sufijo (sin petición) y, si el
+    sufijo no está tabulado, fast_info (una petición ligera, cacheada 48 h:
+    la divisa de un valor no cambia)."""
+    sufijo = ticker[ticker.rfind("."):] if "." in ticker else ""
+    if sufijo in SUFIJOS_DIVISA:
+        return SUFIJOS_DIVISA[sufijo]
+    try:
+        return _fast(yf.Ticker(ticker).fast_info, "currency")
+    except Exception:
+        return None
+
+
+def _pares_fx(divisas: tuple[str, ...]) -> dict[str, str]:
+    """divisa -> ticker del par frente a EUR, solo para divisas convertibles."""
+    return {d: f"{d}{CARTERA_DIVISA_BASE}=X" for d in set(divisas)
+            if d and d != CARTERA_DIVISA_BASE and d in CARTERA_DIVISAS_CONVERTIBLES}
+
+
+def fx_en_fecha(divisa: str | None, fecha, cubo: str) -> tuple[float | None, str]:
+    """Tipo `divisa` -> EUR del día de la operación (último cierre del par
+    hasta esa fecha), para que una compra de hace meses se registre con el
+    cambio de entonces y no con el de hoy. Sin histórico del par se recurre
+    al tipo actual. Devuelve (tipo, "histórico" | "actual" | "fijo") o (None,
+    "") si la divisa no es convertible."""
+    if divisa == CARTERA_DIVISA_BASE:
+        return 1.0, "fijo"
+    if not divisa or divisa not in CARTERA_DIVISAS_CONVERTIBLES:
+        return None, ""
+    hist = obtener_historico(f"{divisa}{CARTERA_DIVISA_BASE}=X", cubo)   # cacheado por cubo: una petición
+    if hist.ok:
+        previos = hist.valor["Close"].loc[:pd.Timestamp(fecha)].dropna()
+        if not previos.empty:
+            return float(previos.iloc[-1]), "histórico"
+    fx = obtener_fx(divisa)
+    return (float(fx.valor), "actual") if fx.ok else (None, "")
+
+
+@st.cache_data(ttl=TTL_LOTE, show_spinner=False)
+def obtener_cierres_eur_lote(tickers: tuple[str, ...], divisas: tuple[str, ...], desde: str, cubo: str) -> Dato:
+    """UNA descarga para toda la cartera: cierres diarios desde `desde`
+    (ISO) de los tickers, del benchmark y de los pares FX necesarios, y todo
+    convertido a EUR día a día (no con el tipo de hoy). Valor: {cierres:
+    DataFrame ticker -> EUR, benchmark: Series EUR, precios: ticker -> último
+    EUR, fx_hoy: divisa -> tipo}. Un ticker cuya divisa no es convertible
+    queda fuera (nunca se mezclan divisas sin convertir). En sesión, la
+    última fila es el precio en vivo, así que sirve de precio actual."""
+    if not tickers:
+        return Dato(None, "yfinance", _ahora())
+    pares = _pares_fx(tuple(divisas) + ("USD",))   # SPY cotiza en USD
+    simbolos = tuple(dict.fromkeys(list(tickers) + [BENCHMARK] + list(pares.values())))
+    try:
+        df = yf.download(list(simbolos), start=desde, interval="1d", group_by="ticker",
+                         auto_adjust=False, progress=False, threads=True)
+    except Exception:
+        return Dato(None, "yfinance", _ahora())
+    if df is None or df.empty:
+        return Dato(None, "yfinance", _ahora())
+
+    def cierre(simbolo: str) -> pd.Series | None:
+        serie = _columna_cierre(df, simbolo)
+        if serie is None:
+            return None
+        if getattr(serie.index, "tz", None) is not None:
+            serie.index = serie.index.tz_localize(None)
+        return serie.astype(float)
+
+    fx: dict[str, pd.Series] = {}
+    for divisa, par in pares.items():
+        serie = cierre(par)
+        if serie is not None:
+            fx[divisa] = serie
+
+    def a_eur(simbolo: str, divisa: str | None) -> pd.Series | None:
+        serie = cierre(simbolo)
+        if serie is None or not divisa:
+            return None
+        if divisa == CARTERA_DIVISA_BASE:
+            return serie
+        if divisa not in fx:
+            return None
+        return (serie * fx[divisa].reindex(serie.index).ffill().bfill()).dropna()
+
+    cierres = {t: s for t, d in zip(tickers, divisas) if (s := a_eur(t, d)) is not None}
+    bench = a_eur(BENCHMARK, "USD")
+    if not cierres and bench is None:
+        return Dato(None, "yfinance", _ahora())
+    df_eur = pd.DataFrame(cierres).sort_index() if cierres else pd.DataFrame()
+    precios = {t: float(s.iloc[-1]) for t, s in cierres.items()}
+    return Dato({"cierres": df_eur, "benchmark": bench, "precios": precios,
+                 "fx_hoy": {d: float(s.iloc[-1]) for d, s in fx.items()}}, "yfinance", _ahora())
 
 
 @st.cache_data(ttl=TTL_ESTADOS_FINANCIEROS, show_spinner=False)

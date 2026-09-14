@@ -167,3 +167,158 @@ def plan_activo_para(ticker: str) -> dict | None:
         if p.get("ticker") == ticker:
             return p
     return None
+
+
+def actualizar_plan_paper(plan_id: int, campos: dict) -> bool:
+    """Cambia estado, capital... de un plan. Sella `actualizado_en`."""
+    cli = _cliente()
+    if cli is None:
+        for p in _memoria("paper_planes", []):
+            if p.get("id") == plan_id:
+                p.update(campos)
+                return True
+        return False
+    try:
+        cli.table("paper_planes").update({
+            **campos, "actualizado_en": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", plan_id).execute()
+        return True
+    except Exception:
+        return False
+
+
+def eliminar_plan_paper(plan_id: int) -> bool:
+    """Borra el plan, sus ejecuciones (cascada en BD) y las operaciones
+    'paper' que esas ejecuciones crearon en el libro: un plan borrado no
+    puede dejar rastro en el rendimiento simulado."""
+    cli = _cliente()
+    if cli is None:
+        planes = _memoria("paper_planes", [])
+        planes[:] = [p for p in planes if p.get("id") != plan_id]
+        ejec = _memoria("paper_ejecuciones", [])
+        ejec[:] = [e for e in ejec if e.get("plan_id") != plan_id]
+        ops = _memoria("operaciones", [])
+        ops[:] = [o for o in ops if not (o.get("origen") == "paper" and o.get("plan_id") == plan_id)]
+        return True
+    try:
+        cli.table("cartera_operaciones").delete().eq("origen", "paper").eq("plan_id", plan_id).execute()
+        cli.table("paper_planes").delete().eq("id", plan_id).execute()
+        return True
+    except Exception:
+        return False
+
+
+def listar_ejecuciones_paper(plan_ids: tuple[int, ...] | None = None) -> list[dict]:
+    """Ejecuciones de nivel, más antigua primero; una consulta para N planes."""
+    cli = _cliente()
+    if cli is None:
+        ejec = _memoria("paper_ejecuciones", [])
+        return [e for e in ejec if plan_ids is None or e.get("plan_id") in plan_ids]
+    try:
+        q = cli.table("paper_ejecuciones").select("*").order("fecha").order("id")
+        if plan_ids is not None:
+            if not plan_ids:
+                return []
+            q = q.in_("plan_id", list(plan_ids))
+        return q.execute().data or []
+    except Exception:
+        return []
+
+
+def registrar_ejecucion_paper(fila: dict) -> int | None:
+    cli = _cliente()
+    if cli is None:
+        ejec = _memoria("paper_ejecuciones", [])
+        fila = {**fila, "id": -(len(ejec) + 1)}
+        ejec.append(fila)
+        return fila["id"]
+    try:
+        r = cli.table("paper_ejecuciones").insert(fila).execute()
+        return r.data[0]["id"] if r.data else None
+    except Exception:
+        return None
+
+
+def sectores_conocidos(tickers: tuple[str, ...]) -> dict[str, str]:
+    """Sector de cada ticker según su ÚLTIMO análisis guardado (el JSON de
+    `entradas` lleva los fundamentales, sector incluido). Cero peticiones a
+    Yahoo para lo ya analizado; la vista solo pide `info` para lo que falte."""
+    cli = _cliente()
+    if cli is None or not tickers:
+        return {}
+    try:
+        filas = (cli.table("analisis_historico").select("ticker,fecha_analisis,entradas")
+                 .in_("ticker", list(tickers)).order("fecha_analisis", desc=True).limit(len(tickers) * 5)
+                 .execute().data or [])
+    except Exception:
+        return {}
+    sectores: dict[str, str] = {}
+    for f in filas:                                  # más reciente primero: el primero que aparece manda
+        sector = (f.get("entradas") or {}).get("sector")
+        if sector and f["ticker"] not in sectores:
+            sectores[f["ticker"]] = sector
+    return sectores
+
+
+# ------------------------------------------------------------------ cartera --
+def listar_operaciones(origen: str = "real", ticker: str | None = None) -> list[dict]:
+    """Libro de operaciones por orden cronológico (fecha, id): el orden es
+    lo que hace válido el FIFO de core_cartera."""
+    cli = _cliente()
+    if cli is None:
+        ops = [o for o in _memoria("operaciones", []) if o.get("origen") == origen]
+        if ticker:
+            ops = [o for o in ops if o.get("ticker") == ticker]
+        return sorted(ops, key=lambda o: (str(o.get("fecha")), abs(o.get("id", 0))))   # ids en memoria: negativos
+    try:
+        q = cli.table("cartera_operaciones").select("*").eq("origen", origen).order("fecha").order("id")
+        if ticker:
+            q = q.eq("ticker", ticker)
+        return q.execute().data or []
+    except Exception:
+        return []
+
+
+def insertar_operacion(fila: dict) -> int | None:
+    """Inserta una compra/venta. La validación (no vender más de lo que se
+    tiene) es responsabilidad de core_cartera ANTES de llamar aquí."""
+    cli = _cliente()
+    if cli is None:
+        ops = _memoria("operaciones", [])
+        fila = {**fila, "id": -(len(ops) + 1), "creado_en": datetime.now(timezone.utc).isoformat()}
+        fila.setdefault("origen", "real")
+        ops.append(fila)
+        return fila["id"]
+    try:
+        r = cli.table("cartera_operaciones").insert(fila).execute()
+        return r.data[0]["id"] if r.data else None
+    except Exception:
+        return None
+
+
+def eliminar_operacion(op_id: int) -> bool:
+    cli = _cliente()
+    if cli is None:
+        ops = _memoria("operaciones", [])
+        ops[:] = [o for o in ops if o.get("id") != op_id]
+        return True
+    try:
+        cli.table("cartera_operaciones").delete().eq("id", op_id).execute()
+        return True
+    except Exception:
+        return False
+
+
+def eliminar_posicion(ticker: str, origen: str = "real") -> bool:
+    """Botón papelera de la ficha: borra TODAS las operaciones del ticker
+    (compras y ventas). Es un borrado del libro, no una venta."""
+    cli = _cliente()
+    if cli is None:
+        ops = _memoria("operaciones", [])
+        ops[:] = [o for o in ops if not (o.get("ticker") == ticker and o.get("origen") == origen)]
+        return True
+    try:
+        cli.table("cartera_operaciones").delete().eq("ticker", ticker).eq("origen", origen).execute()
+        return True
+    except Exception:
+        return False
