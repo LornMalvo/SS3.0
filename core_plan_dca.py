@@ -65,6 +65,17 @@ def _rango(precio: float, atr: float | None, min_pct: float, max_pct: float) -> 
     return acotar(base, min_pct * precio, max_pct * precio)
 
 
+def parametros(precio: float, atr: float | None) -> dict:
+    """Separaciones y rangos de trabajo que usa el plan, expuestos para poder
+    explicar la selección de niveles fuera de la app."""
+    return {
+        "sep_entradas": _separacion(precio, atr, DCA_SEPARACION_ATR_ENTRADAS),
+        "sep_salidas": _separacion(precio, atr, DCA_SEPARACION_ATR_SALIDAS),
+        "suelo": precio - _rango(precio, atr, DCA_RANGO_ENTRADAS_MIN_PCT, DCA_RANGO_ENTRADAS_MAX_PCT),
+        "techo": precio + _rango(precio, atr, DCA_RANGO_SALIDAS_MIN_PCT, DCA_RANGO_SALIDAS_MAX_PCT),
+    }
+
+
 def _nivel(precio: float, zona: dict | None, sintetico: str | None = None) -> dict:
     if zona is not None:
         return {"precio": round(zona["precio"], 4), "fuerza": round(zona["fuerza"], 2), "fuerte": zona["fuerte"],
@@ -107,16 +118,15 @@ def plan(confluencia: dict, ind: dict, precio: float | None, fair_value: float |
     zonas = confluencia.get("zonas", [])
 
     # --- entradas
-    sep_e = _separacion(precio, atr, DCA_SEPARACION_ATR_ENTRADAS)
-    suelo = precio - _rango(precio, atr, DCA_RANGO_ENTRADAS_MIN_PCT, DCA_RANGO_ENTRADAS_MAX_PCT)
+    prm = parametros(precio, atr)
+    sep_e, suelo = prm["sep_entradas"], prm["suelo"]
     entradas = _escalera(zonas, precio, suelo, sep_e, abajo=True)
     for i, (e, w) in enumerate(zip(entradas, DCA_PESOS_ENTRADA), start=1):
         e.update({"nivel": f"E{i}", "peso": w, "dist_pct": (e["precio"] / precio - 1) * 100})
     coste_medio = sum(e["precio"] * e["peso"] for e in entradas)
 
     # --- salidas
-    sep_s = _separacion(precio, atr, DCA_SEPARACION_ATR_SALIDAS)
-    techo = precio + _rango(precio, atr, DCA_RANGO_SALIDAS_MIN_PCT, DCA_RANGO_SALIDAS_MAX_PCT)
+    sep_s, techo = prm["sep_salidas"], prm["techo"]
     salidas = _escalera(zonas, precio, techo, sep_s, abajo=False, n=2)
     s3, motivo_s3 = _tercera_salida(zonas, ind, precio, salidas[-1]["precio"], sep_s, techo, fair_value)
     salidas.append(s3)
@@ -153,6 +163,7 @@ def plan(confluencia: dict, ind: dict, precio: float | None, fair_value: float |
         "ratio_br": (beneficio_pct / riesgo_pct) if riesgo_pct > 0 else None,
         "n1_dist_atr": ((precio - entradas[0]["precio"]) / atr) if es_dato(atr) and atr > 0 else None,
         "n1_fuerte": entradas[0]["fuerte"],
+        "parametros": prm,
         "version": MOTOR_VERSION,
     }
 
@@ -179,7 +190,15 @@ def _tercera_salida(zonas, ind, precio, s2, sep, techo, fair_value):
                 z = max(ext, key=lambda z: z["fuerza"])
                 return _nivel(z["precio"], z), "extensión sobre el fair value por tendencia fuerte"
         return _nivel(fv, None, "fair value (valor objetivo)"), "fair value (valor objetivo)"
-    nivel = _escalera(zonas, s2, techo, sep, abajo=False, n=1)[0]
+    # Escalera técnica: la zona más fuerte a >= una separación por encima de S2
+    # (con `_escalera(n=1)` el primer nivel no aplica separación y S3 caía
+    # sobre la propia S2).
+    validos = [z for z in zonas if minimo <= z["precio"] <= techo]
+    if validos:
+        z = max(validos, key=lambda z: z["fuerza"])
+        nivel = _nivel(z["precio"], z)
+    else:
+        nivel = _nivel(minimo, None)
     if es_dato(fair_value) and fair_value < minimo:
         nivel["motivos"] = ["fair value por debajo de S2: salida técnica"] + nivel["motivos"]
     return nivel, None

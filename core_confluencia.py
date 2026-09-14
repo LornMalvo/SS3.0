@@ -38,6 +38,7 @@ from config_settings import (
     PIVOTE_DECADENCIA_MIN,
     PIVOTE_TOQUES_MULT,
     PIVOTE_VENTANA_DIARIA,
+    PIVOTE_SEMANAL_ANIOS,
     PIVOTE_VENTANA_SEMANAL,
     VP_BANDAS,
     VP_SESIONES,
@@ -56,9 +57,12 @@ ETIQUETAS = {
 }
 
 
-def _cand(tipo: str, precio: float, peso: float | None = None, detalle: str = "") -> dict:
+def _cand(tipo: str, precio: float, peso: float | None = None, detalle: str = "", **geometria) -> dict:
+    """`geometria` son claves opcionales para dibujar el candidato fuera de la
+    app (fechas de los toques de un pivote, extremos de una directriz, rango
+    de un gap): el motor no las usa, el cuaderno de diagnóstico sí."""
     return {"tipo": tipo, "precio": float(precio), "peso": float(peso if peso is not None else CONFLUENCIA_PESOS[tipo]),
-            "etiqueta": ETIQUETAS[tipo] + (f" {detalle}" if detalle else "")}
+            "etiqueta": ETIQUETAS[tipo] + (f" {detalle}" if detalle else ""), **geometria}
 
 
 # ---------------------------------------------------------- candidatos -----
@@ -81,20 +85,22 @@ def _pivotes_agrupados(serie: pd.Series, tipo: str, tolerancia: float, fin: pd.T
         decadencia = max(PIVOTE_DECADENCIA_MIN, 1 - (1 - PIVOTE_DECADENCIA_MIN) * anios / PIVOTE_DECADENCIA_ANIOS)
         peso = CONFLUENCIA_PESOS[tipo] * (1 + PIVOTE_TOQUES_MULT * math.log(toques)) * decadencia
         salida.append(_cand(tipo, float(np.mean([p for _, p in g])), peso,
-                            f"({toques} toque{'s' if toques > 1 else ''})"))
+                            f"({toques} toque{'s' if toques > 1 else ''})",
+                            toques=toques, decadencia=round(decadencia, 2),
+                            fechas=[f for f, _ in g], precios=[p for _, p in g]))
     return salida
 
 
-def _volume_profile(df: pd.DataFrame) -> list[dict]:
-    """POC y value area (VP_VALUE_AREA_PCT del volumen alrededor del POC)
-    sobre las últimas VP_SESIONES. El volumen de cada sesión se reparte por
-    igual entre las bandas que cubre su rango High-Low."""
+def volume_profile(df: pd.DataFrame) -> dict | None:
+    """Perfil de volumen de las últimas VP_SESIONES: {centros, volumen, poc,
+    val, vah, inicio}. El volumen de cada sesión se reparte por igual entre
+    las bandas que cubre su rango High-Low. Público para poder dibujarlo."""
     d = df.iloc[-VP_SESIONES:]
     if len(d) < 60:
-        return []
+        return None
     lo, hi = float(d["Low"].min()), float(d["High"].max())
     if hi <= lo:
-        return []
+        return None
     bordes = np.linspace(lo, hi, VP_BANDAS + 1)
     vol = np.zeros(VP_BANDAS)
     h, l, v = d["High"].to_numpy(), d["Low"].to_numpy(), d["Volume"].fillna(0).to_numpy()
@@ -104,7 +110,7 @@ def _volume_profile(df: pd.DataFrame) -> list[dict]:
         i0, i1 = max(0, min(i0, VP_BANDAS - 1)), max(0, min(i1, VP_BANDAS - 1))
         vol[i0:i1 + 1] += v_i / (i1 - i0 + 1)
     if vol.sum() <= 0:
-        return []
+        return None
     centros = (bordes[:-1] + bordes[1:]) / 2
     poc = int(vol.argmax())
     # value area: expandir desde el POC hacia el lado con más volumen
@@ -120,9 +126,18 @@ def _volume_profile(df: pd.DataFrame) -> list[dict]:
         else:
             a -= 1
             acumulado += abajo
-    return [_cand("poc", centros[poc]),
-            _cand("value_area", bordes[a], detalle="baja (VAL)"),
-            _cand("value_area", bordes[b + 1], detalle="alta (VAH)")]
+    return {"centros": centros, "volumen": vol, "poc": float(centros[poc]), "val": float(bordes[a]),
+            "vah": float(bordes[b + 1]), "inicio": d.index[0]}
+
+
+def _volume_profile(df: pd.DataFrame) -> list[dict]:
+    """POC y value area (VP_VALUE_AREA_PCT del volumen alrededor del POC)."""
+    vp = volume_profile(df)
+    if vp is None:
+        return []
+    return [_cand("poc", vp["poc"]),
+            _cand("value_area", vp["val"], detalle="baja (VAL)"),
+            _cand("value_area", vp["vah"], detalle="alta (VAH)")]
 
 
 def _diagonales(df: pd.DataFrame, atr: float) -> list[dict]:
@@ -155,17 +170,19 @@ def _diagonales(df: pd.DataFrame, atr: float) -> list[dict]:
                     continue
                 proy = y0 + m * (hoy - x0)
                 if proy > 0:
-                    lineas.append((len(tocados), proy))
-        elegidas: list[tuple[int, float]] = []
-        for toques, proy in sorted(lineas, key=lambda t: -t[0]):
-            if any(abs(proy - v) <= 2 * tol for _, v in elegidas):
+                    lineas.append((len(tocados), proy, min(tocados), y0 + m * (min(tocados) - x0)))
+        elegidas: list[tuple] = []
+        for linea in sorted(lineas, key=lambda t: -t[0]):
+            if any(abs(linea[1] - v[1]) <= 2 * tol for v in elegidas):
                 continue
-            elegidas.append((toques, proy))
+            elegidas.append(linea)
             if len(elegidas) >= DIAGONAL_MAX_POR_LADO:
                 break
-        for toques, proy in elegidas:
+        for toques, proy, x_ini, y_ini in elegidas:
             salida.append(_cand("diagonal", proy, CONFLUENCIA_PESOS["diagonal"] * (1 + 0.15 * (toques - DIAGONAL_MIN_TOQUES)),
-                                f"({toques} toques)"))
+                                f"({toques} toques)", toques=toques,
+                                fecha_inicio=d.index[x_ini], precio_inicio=float(y_ini),
+                                fecha_fin=d.index[hoy], precio_fin=float(proy)))
     return salida
 
 
@@ -182,12 +199,12 @@ def _gaps(df: pd.DataFrame) -> list[dict]:
             a, b = h[t - 1], l[t]
             if (l[t + 1:] <= a).any() if t + 1 < len(d) else False:
                 continue
-            salida.append(_cand("gap", (a + b) / 2, detalle="alcista"))
+            salida.append(_cand("gap", (a + b) / 2, detalle="alcista", fecha=d.index[t], rango=(float(a), float(b))))
         elif h[t] < l[t - 1] * (1 - GAP_MIN_PCT):        # gap bajista
             a, b = h[t], l[t - 1]
             if (h[t + 1:] >= b).any() if t + 1 < len(d) else False:
                 continue
-            salida.append(_cand("gap", (a + b) / 2, detalle="bajista"))
+            salida.append(_cand("gap", (a + b) / 2, detalle="bajista", fecha=d.index[t], rango=(float(a), float(b))))
     return salida[-6:]
 
 
@@ -195,7 +212,7 @@ def _fibonacci(ind: dict) -> list[dict]:
     lo, hi = ind.get("min_52s"), ind.get("max_52s")
     if not es_dato(lo) or not es_dato(hi) or hi <= lo:
         return []
-    return [_cand("fibonacci", hi - (hi - lo) * r, detalle=f"{r:.3f}") for r in (0.382, 0.5, 0.618)]
+    return [_cand("fibonacci", hi - (hi - lo) * r, detalle=f"{r:.3f}", ratio=r) for r in (0.382, 0.5, 0.618)]
 
 
 def _redondos(precio: float) -> list[dict]:
@@ -220,7 +237,8 @@ def candidatos(df: pd.DataFrame, ind: dict, precio: float) -> list[dict]:
             c.append(_cand(k, ind[k]))
     sop_d, res_d = pivotes(df.iloc[-VP_SESIONES:], PIVOTE_VENTANA_DIARIA)
     c += _pivotes_agrupados(pd.concat([sop_d, res_d]), "pivote_diario", tol, fin)
-    semanal = df.resample("W-FRI").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
+    reciente = df.loc[df.index[-1] - pd.Timedelta(days=365 * PIVOTE_SEMANAL_ANIOS):]
+    semanal = reciente.resample("W-FRI").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
     sop_s, res_s = pivotes(semanal, PIVOTE_VENTANA_SEMANAL)
     c += _pivotes_agrupados(pd.concat([sop_s, res_s]), "pivote_semanal", tol, fin)
     c += _volume_profile(df)
@@ -256,17 +274,29 @@ def zonas(cands: list[dict], precio: float, sigma: float) -> list[dict]:
     salida = []
     for i in picos:
         centro = float(x[i])
-        comp = [c for c in cands if abs(c["precio"] - centro) <= 1.5 * sigma]
+        comp = []
+        for c in cands:
+            if abs(c["precio"] - centro) <= 1.5 * sigma:
+                comp.append({**c, "aporte": c["peso"] * math.exp(-0.5 * ((c["precio"] - centro) / sigma) ** 2)})
         salida.append({
             "precio": centro,
             "fuerza": float(dens[i]),
             "fuerte": bool(dens[i] >= CONFLUENCIA_FUERTE),
             "lado": "soporte" if centro <= precio else "resistencia",
             "dist_pct": (centro / precio - 1) * 100,
-            "componentes": sorted(comp, key=lambda c: -c["peso"]),
-            "motivos": [c["etiqueta"] for c in sorted(comp, key=lambda c: -c["peso"])],
+            "componentes": sorted(comp, key=lambda c: -c["aporte"]),
+            "motivos": [c["etiqueta"] for c in sorted(comp, key=lambda c: -c["aporte"])],
         })
     return sorted(salida, key=lambda z: z["precio"])
+
+
+def densidad(cands: list[dict], sigma: float, x: np.ndarray) -> np.ndarray:
+    """Suma de gaussianas evaluada en `x` (para dibujar la curva de confluencia)."""
+    if not cands:
+        return np.zeros_like(x)
+    precios = np.array([c["precio"] for c in cands])
+    pesos = np.array([c["peso"] for c in cands])
+    return (pesos[None, :] * np.exp(-0.5 * ((x[:, None] - precios[None, :]) / sigma) ** 2)).sum(axis=1)
 
 
 def calcular(df: pd.DataFrame, ind: dict, precio: float | None) -> dict:

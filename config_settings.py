@@ -398,6 +398,9 @@ CONFLUENCIA_FUERTE = 5.0         # a partir de aquí una zona cuenta como "confl
 
 PIVOTE_VENTANA_DIARIA = 5        # sesiones a cada lado
 PIVOTE_VENTANA_SEMANAL = 4       # semanas a cada lado
+# Los pivotes semanales se buscan solo en los últimos años: más atrás, con
+# splits y otro régimen de precio, son ruido decorativo (y ya decaen a 0,6).
+PIVOTE_SEMANAL_ANIOS = 10
 PIVOTE_TOQUES_MULT = 0.35        # peso *= 1 + MULT * ln(toques)
 PIVOTE_DECADENCIA_ANIOS = 3.0
 PIVOTE_DECADENCIA_MIN = 0.60
