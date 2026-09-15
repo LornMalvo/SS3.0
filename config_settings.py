@@ -473,6 +473,48 @@ CARTERA_CORRELACION_ALTA = 0.75         # a partir de aquí dos posiciones son "
 CARTERA_PESO_ALERTA = 0.25              # una posición > 25 % de la cartera se marca
 CARTERA_SECTOR_ALERTA = 0.40            # un sector > 40 % de la cartera se marca
 
+# ------------------------------------------- recomendación por posición ----
+# Qué hacer con cada posición abierta según DOS ejes: dónde está el precio
+# respecto al coste medio (latente %) y el momentum actual del valor. El
+# momentum se resume en un índice 0-100 con cinco componentes puntuados por
+# tramos y promediados: lectura "seguidora de tendencia" (a diferencia del
+# Timing, que busca dónde ENTRAR, aquí se juzga si la tendencia acompaña a
+# una posición que YA se tiene). Sobre cierres de un año en la divisa de
+# cotización: la conversión a EUR metería ruido de divisa en el momentum.
+MOMENTUM_TRAMOS = {
+    "rsi":        [(25, 20), (40, 40), (50, 55), (60, 75), (70, 90), (78, 80), (90, 55)],   # RSI > 78 = extensión
+    "dist_mm50":  [(-12, 10), (-4, 35), (0, 55), (3, 75), (10, 90), (25, 65)],
+    "dist_mm200": [(-25, 10), (-8, 35), (0, 55), (5, 75), (20, 90), (45, 65)],
+    "ret_20":     [(-15, 10), (-5, 35), (0, 50), (5, 70), (15, 90), (30, 70)],           # retorno 20 sesiones, %
+    "macd":       [(-1.0, 15), (-0.2, 40), (0.0, 50), (0.2, 65), (1.0, 90)],             # histograma / ATR aprox (% precio)
+}
+MOMENTUM_NIVELES = [   # (nota mínima, nivel -2..+2, etiqueta)
+    (68, 2, "alcista fuerte"),
+    (56, 1, "alcista"),
+    (44, 0, "neutro"),
+    (32, -1, "bajista"),
+    (0, -2, "bajista fuerte"),
+]
+MOMENTUM_RSI_SOBRECOMPRA = 75
+MOMENTUM_MIN_SESIONES = 60       # con menos cierres no hay momentum fiable
+# Umbrales de latente (%) de la matriz de recomendación (core_cartera.recomendar).
+CARTERA_RECO_PERDIDA_VENDER = -20.0     # pérdida grande + momentum bajista fuerte: cortar
+CARTERA_RECO_PERDIDA_REDUCIR = -8.0     # pérdida moderada + momentum bajista: aligerar
+CARTERA_RECO_GANANCIA_PARCIAL = 25.0    # ganancia amplia con sobrecompra o giro: recoger parte
+CARTERA_RECO_GANANCIA_PROTEGER = 12.0   # ganancia media con momentum bajista: proteger parte
+CARTERA_RECO_AMPLIAR_MAX = 10.0         # por encima del coste, solo se piramida cerca de él
+RECOMENDACIONES = {
+    "ampliar":       ("AMPLIAR", C_VERDE_OSCURO),
+    "mantener":      ("MANTENER", C_VERDE),
+    "esperar":       ("ESPERAR", C_AMBAR),
+    "venta_parcial": ("VENTA PARCIAL", C_NARANJA),
+    "reducir":       ("REDUCIR", C_ROJO),
+    "vender":        ("VENDER", C_ROJO_OSCURO),
+}
+# Veredictos del último análisis guardado que vetan AMPLIAR (nunca se añade
+# a una posición que el propio motor no compraría hoy).
+RECO_VEREDICTOS_VETO_AMPLIAR = ("NO COMPRAR", "REDUCIR")
+
 # ---------------------------------------------------------- paper trading ----
 # Capital nominal de cada plan simulado: las entradas E1/E2/E3 reparten este
 # importe con los pesos DCA (40/35/25). Se fija al ejecutar el primer nivel y
@@ -481,6 +523,12 @@ PAPER_CAPITAL_DEFECTO = 1000.0
 PAPER_NIVELES_ENTRADA = ("E1", "E2", "E3")
 PAPER_NIVELES_SALIDA = ("S1", "S2", "S3")
 PAPER_NIVEL_STOP = "STOP"
+# Niveles que se ejecutan SOLOS cuando el precio los alcanza (al abrir la
+# vista de Paper Trading y en cada pase del cron de alertas): una orden
+# limitada de compra se llena cuando el precio toca o cae por debajo del
+# nivel. Solo E1 por diseño: E2/E3 son decisiones de promediar que el
+# usuario confirma a mano viendo cómo llega el precio a la zona.
+PAPER_AUTO_NIVELES = ("E1",)
 
 # ---------------------------------------------------------- paper trading ----
 PAPER_ESTADOS = {
@@ -494,6 +542,36 @@ PAPER_ESTADOS = {
 PAPER_ESTADOS_ACTIVOS = ("vigilancia", "parcial_entrada", "abierta", "parcial_salida")
 PAPER_ESTADOS_CERRADOS = ("cerrada",)
 PAPER_ESTADOS_DESCARTADOS = ("descartada",)
+
+# ============================================================== RASTREADOR ====
+# Análisis en bloque. Cada ticker cuesta las mismas peticiones que un
+# análisis individual (histórico, info, estados, precio, earnings): el lote
+# solo abarata los precios. Por eso hay un tope por rastreo: con más valores
+# Yahoo empieza a devolver vacíos y se contamina la caché de fallos.
+RASTREADOR_MAX_TICKERS = 40
+# Puntuación de rastreo (ranking por defecto): calidad, timing y el upside
+# convertido a 0-100 con el mismo tramo que usa el Timing. Un dato ausente se
+# excluye y su peso se reparte (ponderar), como en todos los motores.
+RASTREADOR_PESOS = {"calidad": 40, "timing": 35, "upside": 25}
+# Orden de los veredictos de mejor a peor: manda por encima de la puntuación
+# (un NO COMPRAR con puntuación alta sigue siendo NO COMPRAR).
+VEREDICTO_ORDEN = ("COMPRAR", "ACUMULAR POR TRAMOS", "VIGILAR", "NO COMPRAR", "REDUCIR")
+# Evaluación de señales: retorno de cada análisis guardado a estos
+# horizontes (días naturales) frente al benchmark, agrupado por veredicto y
+# por señal de timing. Es un backtest sobre el histórico PROPIO: solo evalúa
+# señales que el motor emitió de verdad, no reconstrucciones.
+RASTREADOR_HORIZONTES = {"3m": 91, "6m": 182, "12m": 365}
+RASTREADOR_EVALUACION_MIN_DIAS = 5   # un análisis de hace menos días no se evalúa (ruido)
+
+# ================================================================= ALERTAS ====
+# Reglas del cron (tarea_alertas.py, GitHub Actions cada hora en sesión).
+# Cada alerta lleva una clave de deduplicación en `alertas_enviadas`: las de
+# nivel se envían UNA vez por (plan, nivel); las de cercanía, movimiento y
+# recomendación, una vez al día; el resumen de cierre, una vez por sesión.
+ALERTA_CERCA_PCT = 1.5          # distancia (%) a un nivel pendiente para avisar de que está cerca
+ALERTA_MOVIMIENTO_PCT = 5.0     # variación diaria (%) de una posición real que merece aviso
+ALERTA_RECOS_AVISO = ("vender", "reducir", "venta_parcial")   # recomendaciones que se notifican
+ALERTA_RESUMEN_MOVERS = 3       # mayores subidas/bajadas en el resumen de cierre
 
 # ================================================================== CACHÉ ====
 # TTL en segundos. El histórico diario NO usa TTL como mecanismo real: usa el

@@ -177,6 +177,12 @@ div[data-testid="stVerticalBlockBorderWrapper"] > div {{ border-radius: 18px; }}
 /* Filas de apoyo más apretadas y sin la línea de separación: dentro de una
    tarjeta pequeña, el punteado de .ss-metrica satura. */
 .ss-mini .ss-metrica {{ padding: .12rem 0; border-bottom: 0; font-size: .8rem; }}
+/* Recomendación del motor sobre una posición abierta (Cartera). */
+.ss-reco {{
+  border-radius: 8px; padding: .3rem .6rem; color: #fff; font-weight: 800;
+  font-size: .8rem; text-align: center; letter-spacing: .05em; margin: .35rem 0 .15rem;
+}}
+.ss-reco-motivo {{ color: var(--ss-tenue); font-size: .7rem; line-height: 1.35; margin-bottom: .2rem; }}
 .ss-mini-pie {{
   font-size: .76rem; font-weight: 600; margin-top: .3rem;
   padding-top: .3rem; border-top: 1px dashed var(--ss-borde);

@@ -9,11 +9,17 @@ en EUR; de ahí salen el precio actual, la curva y la correlación. La divisa
 de cada ticker se resuelve por sufijo (sin petición). El sector solo se pide
 (cacheado) cuando se abre el bloque de riesgo.
 
+Cada ficha lleva la RECOMENDACIÓN del motor sobre la posición (AMPLIAR,
+MANTENER, ESPERAR, VENTA PARCIAL, REDUCIR, VENDER: core_cartera.recomendar,
+matriz latente x momentum con el último veredicto guardado como veto) y la
+variación de la sesión en % y en EUR.
+
 Distribución:
   [ Resumen: valor · coste · latente · realizado · retorno ]
   [ toggle Registrar operación ]  -> formulario
   [ fichas de posiciones abiertas, 3 columnas, con Analizar y papelera ]
   [ toggle Rendimiento vs SPY ] [ toggle Riesgo ] [ toggle Libro ] [ cerradas ]
+  (rendimiento y riesgo abiertos por defecto)
 """
 
 from __future__ import annotations
@@ -158,13 +164,27 @@ def _ficha(p: dict) -> None:
     badge = ui.badge(f"{peso:.0f} % cartera", C_NARANJA if p.get("peso_alto") else C_TEXTO_TENUE) if es_dato(peso) else ""
     color_lat = ui.COLOR_SEMAFORO.get(_sem(p.get("latente_eur")) or "", "inherit")
     valor = _eur(p["valor_eur"]) if es_dato(p.get("valor_eur")) else TEXTO_ND
+    reco, mom = p.get("recomendacion"), p.get("momentum")
+    if reco:
+        reco_html = (f'<div class="ss-reco" style="background:{reco["color"]}">{reco["etiqueta"]}</div>'
+                     f'<div class="ss-reco-motivo">{ui.escapar(reco["motivo"])}'
+                     + (f' · momentum {mom["nota"]:.0f}/100' if mom else "") + "</div>")
+    else:
+        reco_html = '<div class="ss-reco-motivo">Sin recomendación: falta precio o histórico para el momentum.</div>'
+    # Variación de la sesión: % del valor en su divisa y EUR ganados/perdidos hoy.
+    vd_pct, vd_eur = p.get("var_dia_pct"), p.get("var_dia_eur")
+    color_dia = ui.COLOR_SEMAFORO.get(_sem(vd_pct) or "", "inherit")
+    hoy = (f'<span style="color:{color_dia};font-weight:700">{ui.fmt_pct(vd_pct)}'
+           + (f' · {ui.escapar(_eur(vd_eur))}' if es_dato(vd_eur) else "") + "</span>") if es_dato(vd_pct) else TEXTO_ND
     with ui.tarjeta():
         st.markdown(
             f'<div class="ss-mini-cab"><span class="ss-mini-tk">{t}</span>{badge}</div>'
+            + reco_html +
             f'<div class="ss-mini-dest">{ui.escapar(valor)}</div>'
             f'<div class="ss-mini-sub" style="color:{color_lat};font-weight:600">'
             f'{ui.escapar(_eur(p.get("latente_eur")))} · {ui.fmt_pct(p.get("latente_pct"))} latente</div>'
             f'<div class="ss-mini">'
+            f'<div class="ss-metrica"><span>Hoy</span><span>{hoy}</span></div>'
             f'<div class="ss-metrica"><span>Acciones</span><span>{_acc(p["acciones"])}</span></div>'
             f'<div class="ss-metrica"><span>Coste medio</span><span>{ui.escapar(_eur(p["coste_medio_eur"]))}</span></div>'
             f'<div class="ss-metrica"><span>Precio actual</span><span>{ui.escapar(_eur(p.get("precio_eur")))}</span></div>'
@@ -209,7 +229,7 @@ def _rendimiento(operaciones: list[dict], mercado) -> None:
                     f'venta vende la misma fracción de su sombra.</div>', unsafe_allow_html=True)
 
 
-def _riesgo(posiciones: dict[str, dict], mercado) -> None:
+def _riesgo(posiciones: dict[str, dict], mercado, ultimos: dict[str, dict]) -> None:
     abiertas = [p for p in posiciones.values() if not p["cerrada"]]
     with ui.tarjeta("Riesgo: concentración, sectores y correlación"):
         altas = [p for p in abiertas if p.get("peso_alto")]
@@ -223,10 +243,10 @@ def _riesgo(posiciones: dict[str, dict], mercado) -> None:
         c_sec, c_cor = st.columns(2)
         with c_sec:
             st.markdown('<div class="ss-racha-tit">Exposición por sector</div>', unsafe_allow_html=True)
-            # Sector: primero del último análisis guardado (cero peticiones);
-            # `info` (cacheado 1 h) solo para lo nunca analizado, y solo aquí,
-            # con el bloque de riesgo abierto.
-            sectores = db_supabase.sectores_conocidos(tuple(p["ticker"] for p in abiertas))
+            # Sector: primero del último análisis guardado (ya consultado
+            # para la recomendación: cero peticiones); `info` (cacheado 1 h)
+            # solo para lo nunca analizado, y solo con este bloque abierto.
+            sectores = {t: a["sector"] for t, a in ultimos.items() if a.get("sector")}
             for p in abiertas:
                 if p["ticker"] not in sectores:
                     sectores[p["ticker"]] = (obtener_info(p["ticker"]).valor or {}).get("sector")
@@ -314,8 +334,16 @@ def render() -> None:
     aviso = st.session_state.pop("cart_aviso", None)
     if aviso:
         st.caption(aviso)
-    precios = (mercado.valor or {}).get("precios", {}) if mercado is not None and mercado.ok else {}
-    core_cartera.valorar(posiciones, precios)
+    lote = (mercado.valor or {}) if mercado is not None and mercado.ok else {}
+    core_cartera.valorar(posiciones, lote.get("precios", {}))
+    core_cartera.variacion_diaria(posiciones, lote.get("cierres_nativos"), lote.get("cierres"))
+    # Recomendación por posición: momentum sobre los cierres nativos del
+    # mismo lote (cero peticiones extra) y último veredicto guardado como veto.
+    ultimos = db_supabase.ultimos_analisis(tuple(abiertas)) if abiertas else {}
+    for t in abiertas:
+        p = posiciones[t]
+        p["momentum"] = core_cartera.momentum((lote.get("cierres_nativos") or {}).get(t))
+        p["recomendacion"] = core_cartera.recomendar(p.get("latente_pct"), p["momentum"], ultimos.get(t))
 
     if operaciones:
         _resumen(core_cartera.resumen(posiciones), mercado)
@@ -336,14 +364,16 @@ def render() -> None:
             with columnas[i % 3]:
                 _ficha(posiciones[t])
 
+    # Rendimiento y riesgo se muestran por defecto (decisión de Samuel,
+    # sesión 5); el libro sigue plegado porque es largo.
     c1, c2, c3 = st.columns(3)
-    ver_rend = c1.toggle(f"Rendimiento vs {BENCHMARK}", key="toggle_rend", disabled=not abiertas)
-    ver_riesgo = c2.toggle("Riesgo y sectores", key="toggle_riesgo", disabled=not abiertas)
+    ver_rend = c1.toggle(f"Rendimiento vs {BENCHMARK}", value=True, key="toggle_rend", disabled=not abiertas)
+    ver_riesgo = c2.toggle("Riesgo y sectores", value=True, key="toggle_riesgo", disabled=not abiertas)
     ver_libro = c3.toggle("Libro de operaciones", key="toggle_libro")
-    if ver_rend:
+    if ver_rend and abiertas:
         _rendimiento(operaciones, mercado)
-    if ver_riesgo:
-        _riesgo(posiciones, mercado)
+    if ver_riesgo and abiertas:
+        _riesgo(posiciones, mercado, ultimos)
     if ver_libro:
         _libro(operaciones)
     _cerradas(posiciones)

@@ -241,7 +241,8 @@ def obtener_cierres_eur_lote(tickers: tuple[str, ...], divisas: tuple[str, ...],
     (ISO) de los tickers, del benchmark y de los pares FX necesarios, y todo
     convertido a EUR día a día (no con el tipo de hoy). Valor: {cierres:
     DataFrame ticker -> EUR, benchmark: Series EUR, precios: ticker -> último
-    EUR, fx_hoy: divisa -> tipo}. Un ticker cuya divisa no es convertible
+    EUR, cierres_nativos: ticker -> Series en su divisa, fx_hoy: divisa ->
+    tipo}. Un ticker cuya divisa no es convertible
     queda fuera (nunca se mezclan divisas sin convertir). En sesión, la
     última fila es el precio en vivo, así que sirve de precio actual."""
     if not tickers:
@@ -281,13 +282,44 @@ def obtener_cierres_eur_lote(tickers: tuple[str, ...], divisas: tuple[str, ...],
         return (serie * fx[divisa].reindex(serie.index).ffill().bfill()).dropna()
 
     cierres = {t: s for t, d in zip(tickers, divisas) if (s := a_eur(t, d)) is not None}
+    # Cierres SIN convertir: alimentan el momentum y la variación diaria de
+    # cada posición (el movimiento del valor, no el del par de divisas) y
+    # cubren también tickers cuya divisa no es convertible.
+    nativos = {t: s for t in tickers if (s := cierre(t)) is not None}
     bench = a_eur(BENCHMARK, "USD")
-    if not cierres and bench is None:
+    if not cierres and bench is None and not nativos:
         return Dato(None, "yfinance", _ahora())
     df_eur = pd.DataFrame(cierres).sort_index() if cierres else pd.DataFrame()
     precios = {t: float(s.iloc[-1]) for t, s in cierres.items()}
-    return Dato({"cierres": df_eur, "benchmark": bench, "precios": precios,
+    return Dato({"cierres": df_eur, "benchmark": bench, "precios": precios, "cierres_nativos": nativos,
                  "fx_hoy": {d: float(s.iloc[-1]) for d, s in fx.items()}}, "yfinance", _ahora())
+
+
+@st.cache_data(ttl=TTL_LOTE, show_spinner=False)
+def obtener_cierres_lote(tickers: tuple[str, ...], desde: str, cubo: str) -> Dato:
+    """UNA descarga de cierres diarios SIN convertir (cada ticker en su
+    divisa) desde `desde` (ISO), más el benchmark. Valor: {ticker: Series}.
+    La usa la evaluación de señales del Rastreador: el retorno de cada
+    análisis se mide en la divisa en que se guardó su precio."""
+    if not tickers:
+        return Dato(None, "yfinance", _ahora())
+    simbolos = tuple(dict.fromkeys(list(tickers) + [BENCHMARK]))
+    try:
+        df = yf.download(list(simbolos), start=desde, interval="1d", group_by="ticker",
+                         auto_adjust=False, progress=False, threads=True)
+    except Exception:
+        return Dato(None, "yfinance", _ahora())
+    if df is None or df.empty:
+        return Dato(None, "yfinance", _ahora())
+    out: dict[str, pd.Series] = {}
+    for simbolo in simbolos:
+        serie = _columna_cierre(df, simbolo)
+        if serie is None:
+            continue
+        if getattr(serie.index, "tz", None) is not None:
+            serie.index = serie.index.tz_localize(None)
+        out[simbolo] = serie.astype(float)
+    return Dato(out or None, "yfinance", _ahora())
 
 
 @st.cache_data(ttl=TTL_ESTADOS_FINANCIEROS, show_spinner=False)

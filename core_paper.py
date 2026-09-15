@@ -21,6 +21,7 @@ from datetime import date
 
 from config_settings import (
     CARTERA_TOLERANCIA_ACCIONES,
+    PAPER_AUTO_NIVELES,
     PAPER_CAPITAL_DEFECTO,
     PAPER_NIVEL_STOP,
     PAPER_NIVELES_ENTRADA,
@@ -160,6 +161,53 @@ def rendimiento(plan: dict, ejecuciones: list[dict], precio_actual: float | None
 
 
 def fila_ejecucion(plan_id: int, nivel: str, fecha: date, precio: float, acciones: float,
-                   operacion_id: int | None = None) -> dict:
+                   operacion_id: int | None = None, automatica: bool = False) -> dict:
     return {"plan_id": plan_id, "nivel": nivel, "fecha": fecha.isoformat(), "precio": float(precio),
-            "acciones": float(acciones), "operacion_id": operacion_id}
+            "acciones": float(acciones), "operacion_id": operacion_id, "automatica": bool(automatica)}
+
+
+# ------------------------------------------------------- automatización ----
+def nivel_alcanzado(nivel: str, precio_nivel: float | None, precio_actual: float | None) -> bool:
+    """Una entrada (orden limitada de compra) se llena cuando el precio toca
+    o cae por debajo del nivel; una salida, cuando lo toca o supera; el
+    STOP, cuando el precio cae por debajo."""
+    if not es_dato(precio_nivel) or not es_dato(precio_actual):
+        return False
+    if nivel in PAPER_NIVELES_ENTRADA or nivel == PAPER_NIVEL_STOP:
+        return precio_actual <= precio_nivel
+    return precio_actual >= precio_nivel
+
+
+def auto_ejecuciones(planes: list[dict], ejec_por_plan: dict, precios: dict[str, float | None]) -> list[dict]:
+    """Ejecuciones que toca disparar solas ahora: por cada plan activo, los
+    niveles de PAPER_AUTO_NIVELES pendientes que el precio ha alcanzado.
+    Precio de llenado = el del nivel (orden limitada) o el actual si el
+    precio ha abierto con hueco por debajo (la orden se llenaría mejor).
+    Devuelve [{plan, ejecuciones, nivel, precio}] listo para registrar."""
+    out = []
+    for p in planes:
+        ejec = ejec_por_plan.get(p["id"], [])
+        precio_actual = precios.get(p["ticker"])
+        if not es_dato(precio_actual):
+            continue
+        pendientes = niveles_pendientes(p, ejec)
+        for nivel in PAPER_AUTO_NIVELES:
+            if nivel not in pendientes:
+                continue
+            objetivo = precio_nivel(p, nivel)
+            if nivel_alcanzado(nivel, objetivo, precio_actual):
+                out.append({"plan": p, "ejecuciones": ejec, "nivel": nivel,
+                            "precio": float(min(objetivo, precio_actual))})
+    return out
+
+
+def capitales(plan: dict, ejecuciones: list[dict]) -> dict:
+    """Capital nominal asignado al plan (EUR) y la parte de ese capital que
+    corresponde a los niveles de ENTRADA ya ejecutados (capital x peso):
+    es lo "asignado y ejecutado" del resumen. Un plan en vigilancia cuenta
+    con el capital por defecto hasta que se fije con la primera entrada."""
+    capital = float(plan.get("capital_eur") or PAPER_CAPITAL_DEFECTO)
+    hechas = ejecutadas(ejecuciones)
+    pesos = {e["nivel"]: float(e.get("peso") or 0) for e in (plan.get("entradas") or [])}
+    ejecutado = capital * sum(w for n, w in pesos.items() if n in hechas)
+    return {"asignado": capital, "ejecutado": ejecutado}

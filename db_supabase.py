@@ -239,25 +239,110 @@ def registrar_ejecucion_paper(fila: dict) -> int | None:
         return None
 
 
-def sectores_conocidos(tickers: tuple[str, ...]) -> dict[str, str]:
-    """Sector de cada ticker según su ÚLTIMO análisis guardado (el JSON de
-    `entradas` lleva los fundamentales, sector incluido). Cero peticiones a
-    Yahoo para lo ya analizado; la vista solo pide `info` para lo que falte."""
+def ejecutar_nivel_paper(plan: dict, ejecuciones: list[dict], nivel: str, precio: float, fecha, acciones: float,
+                         fx: float | None, capital: float | None = None, automatica: bool = False) -> dict | None:
+    """Flujo completo de una ejecución de nivel (manual desde la vista o
+    automática desde la vista/cron): capital del plan si es la primera
+    entrada -> operación 'paper' en el libro (en EUR, si la divisa es
+    convertible: `fx` es EUR por unidad de la divisa del plan el día de la
+    ejecución) -> fila en paper_ejecuciones -> estado derivado -> diario.
+    Devuelve la fila de ejecución registrada o None si falló."""
+    from config_settings import PAPER_NIVELES_ENTRADA
+    import core_paper
+    pid = plan["id"]
+    if capital is not None:
+        actualizar_plan_paper(pid, {"capital_eur": capital})
+        plan["capital_eur"] = capital
+    precio_eur = precio * fx if fx is not None else None
+    op_id = None
+    if precio_eur is not None:
+        op_id = insertar_operacion({
+            "ticker": plan["ticker"], "tipo": "compra" if nivel in PAPER_NIVELES_ENTRADA else "venta",
+            "fecha": fecha.isoformat(), "acciones": float(acciones), "precio_eur": float(precio_eur), "comision_eur": 0.0,
+            "origen": "paper", "plan_id": pid if pid > 0 else None,
+            "nota": f"Paper {nivel}" + (" (automática)" if automatica else ""),
+            "divisa": plan.get("divisa"), "precio_origen": float(precio), "fx_aplicado": fx,
+        })
+    fila = core_paper.fila_ejecucion(pid, nivel, fecha, precio, acciones, op_id if op_id and op_id > 0 else None,
+                                     automatica)
+    ejec_id = registrar_ejecucion_paper(fila)
+    if ejec_id is None:
+        if op_id is not None:
+            eliminar_operacion(op_id)
+        return None
+    fila["id"] = ejec_id
+    nuevo = core_paper.estado(plan, ejecuciones + [fila])
+    if nuevo != plan.get("estado"):
+        actualizar_plan_paper(pid, {"estado": nuevo})
+        plan["estado"] = nuevo
+    registrar_decision(plan["ticker"], "ejecutar_nivel",
+                       f"{nivel} a {precio:g} {plan.get('divisa') or ''}" + (" · automática al alcanzar el nivel" if automatica else ""),
+                       pid if pid > 0 else None)
+    return fila
+
+
+def ultimos_analisis(tickers: tuple[str, ...]) -> dict[str, dict]:
+    """Último análisis guardado de cada ticker: {ticker: {fecha, veredicto,
+    upside_pct, calidad, timing, senal_timing, fair_value, sector}}. UNA
+    consulta para N tickers; el sector sale del JSON `entradas`. Lo usan la
+    exposición sectorial de Cartera (cero peticiones a Yahoo para lo ya
+    analizado) y el veto de la recomendación por posición."""
     cli = _cliente()
     if cli is None or not tickers:
         return {}
     try:
-        filas = (cli.table("analisis_historico").select("ticker,fecha_analisis,entradas")
+        filas = (cli.table("analisis_historico")
+                 .select("ticker,fecha_analisis,veredicto,upside_pct,calidad,timing,senal_timing,fair_value,entradas")
                  .in_("ticker", list(tickers)).order("fecha_analisis", desc=True).limit(len(tickers) * 5)
                  .execute().data or [])
     except Exception:
         return {}
-    sectores: dict[str, str] = {}
+    out: dict[str, dict] = {}
     for f in filas:                                  # más reciente primero: el primero que aparece manda
-        sector = (f.get("entradas") or {}).get("sector")
-        if sector and f["ticker"] not in sectores:
-            sectores[f["ticker"]] = sector
-    return sectores
+        if f["ticker"] in out:
+            continue
+        out[f["ticker"]] = {k: f.get(k) for k in ("veredicto", "upside_pct", "calidad", "timing", "senal_timing", "fair_value")}
+        out[f["ticker"]]["fecha"] = f.get("fecha_analisis")
+        out[f["ticker"]]["sector"] = (f.get("entradas") or {}).get("sector")
+    return out
+
+
+def sectores_conocidos(tickers: tuple[str, ...]) -> dict[str, str]:
+    """Sector de cada ticker según su ÚLTIMO análisis guardado."""
+    return {t: a["sector"] for t, a in ultimos_analisis(tickers).items() if a.get("sector")}
+
+
+def listar_analisis(desde: str | None = None, hasta: str | None = None) -> list[dict]:
+    """Filas de `analisis_historico` (sin el JSON de entradas) para la
+    evaluación de señales del Rastreador: una consulta, más antigua primero."""
+    cli = _cliente()
+    if cli is None:
+        return []
+    try:
+        q = (cli.table("analisis_historico")
+             .select("id,ticker,fecha_analisis,motor_version,precio,divisa,calidad,fair_value,upside_pct,timing,"
+                     "senal_timing,veredicto,plan")
+             .order("fecha_analisis"))
+        if desde:
+            q = q.gte("fecha_analisis", desde)
+        if hasta:
+            q = q.lte("fecha_analisis", hasta)
+        return q.execute().data or []
+    except Exception:
+        return []
+
+
+def guardar_backtest(filas: list[dict]) -> bool:
+    """Retornos a 3/6/12 meses de cada señal, deduplicados por (versión,
+    ticker, fecha): se reescriben conforme se cumplen horizontes."""
+    cli = _cliente()
+    if cli is None or not filas:
+        return False
+    try:
+        cli.table("backtest_resultados").upsert(filas, on_conflict="motor_version,ticker,fecha_senal").execute()
+        return True
+    except Exception:
+        return False
 
 
 # ------------------------------------------------------------------ cartera --
@@ -319,6 +404,70 @@ def eliminar_posicion(ticker: str, origen: str = "real") -> bool:
         return True
     try:
         cli.table("cartera_operaciones").delete().eq("ticker", ticker).eq("origen", origen).execute()
+        return True
+    except Exception:
+        return False
+
+
+# ------------------------------------------------------------- rastreador --
+def listar_universo() -> list[str]:
+    """Tickers del universo propio del Rastreador (persistidos)."""
+    cli = _cliente()
+    if cli is None:
+        return sorted(_memoria("universo", set()))
+    try:
+        return [f["ticker"] for f in cli.table("rastreador_universo").select("ticker").order("ticker").execute().data or []]
+    except Exception:
+        return []
+
+
+def anadir_universo(tickers: list[str]) -> bool:
+    cli = _cliente()
+    tickers = [t for t in dict.fromkeys(t.strip().upper() for t in tickers) if t]
+    if not tickers:
+        return True
+    if cli is None:
+        _memoria("universo", set()).update(tickers)
+        return True
+    try:
+        cli.table("rastreador_universo").upsert([{"ticker": t} for t in tickers], on_conflict="ticker").execute()
+        return True
+    except Exception:
+        return False
+
+
+def quitar_universo(ticker: str) -> bool:
+    cli = _cliente()
+    if cli is None:
+        _memoria("universo", set()).discard(ticker)
+        return True
+    try:
+        cli.table("rastreador_universo").delete().eq("ticker", ticker).execute()
+        return True
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------- alertas --
+def alertas_ya_enviadas(claves: list[str]) -> set[str]:
+    """Claves de deduplicación ya registradas (una consulta)."""
+    cli = _cliente()
+    if cli is None or not claves:
+        return set()
+    try:
+        filas = cli.table("alertas_enviadas").select("clave_dedup").in_("clave_dedup", claves).execute().data or []
+        return {f["clave_dedup"] for f in filas}
+    except Exception:
+        return set()
+
+
+def registrar_alerta(tipo: str, ticker: str, clave: str) -> bool:
+    cli = _cliente()
+    if cli is None:
+        return False
+    try:
+        cli.table("alertas_enviadas").upsert({"tipo": tipo, "ticker": ticker, "clave_dedup": clave},
+                                             on_conflict="clave_dedup").execute()
         return True
     except Exception:
         return False

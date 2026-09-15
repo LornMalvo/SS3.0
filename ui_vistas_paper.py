@@ -7,7 +7,13 @@ fecha editables), descartar (solo en vigilancia), analizar y eliminar.
 Precios: UNA descarga por lote para todos los tickers de los planes
 visibles. Las ejecuciones se registran en la divisa del plan y, además, como
 operación con origen 'paper' en el libro (en EUR, con el tipo del día) para
-que el motor de cartera sea el mismo.
+que el motor de cartera sea el mismo (db_supabase.ejecutar_nivel_paper, el
+mismo flujo que usa el cron).
+
+Ejecución automática: al abrir la vista, todo plan activo cuyo precio haya
+alcanzado un nivel de PAPER_AUTO_NIVELES (E1) se ejecuta solo, como una
+orden limitada, y se avisa arriba. El cron de alertas hace lo mismo cada
+hora aunque la app esté cerrada.
 """
 
 from __future__ import annotations
@@ -62,7 +68,8 @@ def _nivel_html(nivel: dict, color: str, divisa: str, precio_actual, ejecucion: 
     a precio) o bien la distancia del precio actual al nivel."""
     precio = ui.escapar(ui.fmt_precio(nivel["precio"], divisa))
     if ejecucion:
-        derecha = (f'<span style="color:{color};font-weight:700">✓ {str(ejecucion["fecha"])[8:10]}/{str(ejecucion["fecha"])[5:7]}'
+        marca = "⚡" if ejecucion.get("automatica") else "✓"      # rayo = ejecución automática al tocar el nivel
+        derecha = (f'<span style="color:{color};font-weight:700">{marca} {str(ejecucion["fecha"])[8:10]}/{str(ejecucion["fecha"])[5:7]}'
                    f' · {ui.escapar(ui.fmt_num(ejecucion["precio"]))}</span>')
     else:
         d = _dist(precio_actual, nivel["precio"])
@@ -129,63 +136,81 @@ def _ejecutar(p: dict, ejec: list[dict], precio_actual) -> None:
                           key=f"paper_fecha_{pid}")
     primera_entrada = not (core_paper.ejecutadas(ejec) & set(PAPER_NIVELES_ENTRADA))
     capital = float(p.get("capital_eur") or PAPER_CAPITAL_DEFECTO)
+    c4, c5 = st.columns([1, 1])
     if primera_entrada:
-        capital = st.number_input("Capital del plan (€)", min_value=1.0, value=capital, step=100.0,
+        capital = c4.number_input("Capital del plan (€)", min_value=1.0, value=capital, step=100.0,
                                   key=f"paper_capital_{pid}",
                                   help="Importe nominal que reparten E1/E2/E3 con sus pesos. Se fija con la primera entrada.")
     # El capital es EUR y el precio está en la divisa del plan: el tamaño se
     # calcula pasando el capital a esa divisa con el tipo del día elegido.
     fx, _ = fx_en_fecha(p.get("divisa"), fecha, cubo_mercado())
-    acciones = core_paper.acciones_para({**p, "capital_eur": capital}, nivel, precio, ejec, fx)
-    st.markdown(f'<div class="ss-anotacion">{nivel}: {ui.fmt_num(acciones, 4) if es_dato(acciones) else TEXTO_ND} '
-                f'acciones a {ui.escapar(ui.fmt_precio(precio, p.get("divisa")))}'
+    propuestas = core_paper.acciones_para({**p, "capital_eur": capital}, nivel, precio, ejec, fx)
+    # Acciones editables: la propuesta sale del capital y el peso del nivel,
+    # pero se puede ejecutar un número exacto (el capital nominal no cambia).
+    acciones = c5.number_input("Acciones", min_value=0.0, value=float(propuestas) if es_dato(propuestas) else 0.0,
+                               step=1.0, format="%.4f", key=f"paper_acc_{pid}_{nivel}",
+                               help=f"Propuesta por capital x peso: {ui.fmt_num(propuestas, 4) if es_dato(propuestas) else TEXTO_ND}. "
+                                    "Puedes escribir el número exacto de acciones.")
+    if nivel not in PAPER_NIVELES_ENTRADA:
+        vivas = core_paper.acciones_vivas(ejec)
+        if acciones > vivas + 1e-9:
+            st.error(f"No puedes vender {ui.fmt_num(acciones, 4)} acciones: hay {ui.fmt_num(vivas, 4)} vivas.")
+            return
+    importe = acciones * precio if es_dato(precio) else None
+    st.markdown(f'<div class="ss-anotacion">{nivel}: {ui.fmt_num(acciones, 4)} acciones a '
+                f'{ui.escapar(ui.fmt_precio(precio, p.get("divisa")))} = {ui.escapar(ui.fmt_precio(importe, p.get("divisa")))}'
                 + ("" if es_dato(fx) or p.get("divisa") == "EUR" else " (divisa no convertible: capital tomado como nominal en esa divisa)")
                 + '</div>', unsafe_allow_html=True)
     if st.button("Ejecutar", key=f"paper_ejec_{pid}", type="primary", width="stretch", icon=":material/play_arrow:",
                  disabled=not es_dato(acciones) or acciones <= 0 or precio <= 0):
-        _registrar_ejecucion(p, ejec, nivel, float(precio), fecha, acciones, capital if primera_entrada else None)
+        fila = db_supabase.ejecutar_nivel_paper(p, ejec, nivel, float(precio), fecha, float(acciones), fx,
+                                                capital if primera_entrada else None)
+        if fila is None:
+            st.error("No se pudo registrar la ejecución.")
+            return
         st.rerun()
 
 
-def _registrar_ejecucion(p: dict, ejec: list[dict], nivel: str, precio: float, fecha: date, acciones: float,
-                         capital: float | None) -> None:
-    """Ejecución -> operación 'paper' en el libro (en EUR, si la divisa es
-    convertible) -> fila en paper_ejecuciones -> estado derivado -> diario."""
-    pid = p["id"]
-    if capital is not None:
-        db_supabase.actualizar_plan_paper(pid, {"capital_eur": capital})
-        p["capital_eur"] = capital
-    fx, _ = fx_en_fecha(p.get("divisa"), fecha, cubo_mercado())     # tipo del día de la ejecución
-    precio_eur = precio * fx if es_dato(fx) else None
-    op_id = None
-    if es_dato(precio_eur):
-        op_id = db_supabase.insertar_operacion({
-            "ticker": p["ticker"], "tipo": "compra" if nivel in PAPER_NIVELES_ENTRADA else "venta",
-            "fecha": fecha.isoformat(), "acciones": acciones, "precio_eur": float(precio_eur), "comision_eur": 0.0,
-            "origen": "paper", "plan_id": pid if pid > 0 else None, "nota": f"Paper {nivel}",
-            "divisa": p.get("divisa"), "precio_origen": precio, "fx_aplicado": fx,
-        })
-    fila = core_paper.fila_ejecucion(pid, nivel, fecha, precio, acciones, op_id if op_id and op_id > 0 else None)
-    if db_supabase.registrar_ejecucion_paper(fila) is None:
-        st.error("No se pudo registrar la ejecución.")
+def _automaticas(planes: list[dict], ejec_por_plan: dict, precios: dict) -> None:
+    """Dispara las ejecuciones automáticas pendientes (E1 alcanzado) y deja
+    un aviso para el siguiente render. Cada disparo escribe en Supabase, así
+    que se hace ANTES de dibujar y se vuelve a cargar todo con rerun."""
+    pendientes = core_paper.auto_ejecuciones(planes, ejec_por_plan,
+                                             {t: (v or {}).get("precio") for t, v in precios.items()})
+    if not pendientes:
         return
-    nuevo = core_paper.estado(p, ejec + [fila])
-    if nuevo != p.get("estado"):
-        db_supabase.actualizar_plan_paper(pid, {"estado": nuevo})
-    db_supabase.registrar_decision(p["ticker"], "ejecutar_nivel", f"{nivel} a {precio:g} {p.get('divisa') or ''}",
-                                   pid if pid > 0 else None)
+    avisos = []
+    for a in pendientes:
+        p, nivel, precio = a["plan"], a["nivel"], a["precio"]
+        hoy = date.today()
+        fx, _ = fx_en_fecha(p.get("divisa"), hoy, cubo_mercado())
+        acciones = core_paper.acciones_para(p, nivel, precio, a["ejecuciones"], fx)
+        if not es_dato(acciones) or acciones <= 0:
+            continue
+        primera = not (core_paper.ejecutadas(a["ejecuciones"]) & set(PAPER_NIVELES_ENTRADA))
+        capital = float(p.get("capital_eur") or PAPER_CAPITAL_DEFECTO) if primera else None
+        fila = db_supabase.ejecutar_nivel_paper(p, a["ejecuciones"], nivel, precio, hoy, acciones, fx, capital,
+                                                automatica=True)
+        if fila is not None:
+            avisos.append(f"{p['ticker']} {nivel} a {ui.fmt_precio(precio, p.get('divisa'))} ({ui.fmt_num(acciones, 4)} acc.)")
+    if avisos:
+        st.session_state["paper_aviso_auto"] = "Ejecución automática al alcanzar el nivel: " + "; ".join(avisos)
+        st.rerun()
 
 
 # ------------------------------------------------------------------- ficha --
-def _ficha(p: dict, ejec: list[dict], precio_actual) -> None:
+def _ficha(p: dict, ejec: list[dict], cot: dict) -> None:
     estado = core_paper.estado(p, ejec)
     etiqueta, color = PAPER_ESTADOS.get(estado, (estado, C_TEXTO_TENUE))
     divisa = p.get("divisa") or ""
     pid = p["id"]
+    precio_actual, var = cot.get("precio"), cot.get("variacion_pct")
+    var_html = (f'<span style="color:{ui.COLOR_SEMAFORO.get(_sem(var) or "", "inherit")};font-weight:700">{ui.fmt_pct(var)} hoy</span> · '
+                if es_dato(var) else "")
     with ui.tarjeta():
         st.markdown(
             f'<div class="ss-mini-cab"><span class="ss-mini-tk">{p.get("ticker")}</span>{ui.badge(etiqueta, color)}</div>'
-            f'<div class="ss-mini-sub">Ahora {ui.escapar(ui.fmt_precio(precio_actual, divisa))} · '
+            f'<div class="ss-mini-sub">Ahora {ui.escapar(ui.fmt_precio(precio_actual, divisa))} · {var_html}'
             f'ref. {ui.escapar(ui.fmt_precio(p.get("precio_ref"), divisa))} · {ui.escapar(p.get("veredicto") or "")}'
             f' · {str(p.get("creado_en") or "")[:10]}'
             + (f' · capital {ui.escapar(ui.fmt_precio(p.get("capital_eur"), "EUR", 0))}' if es_dato(p.get("capital_eur")) else "")
@@ -220,16 +245,23 @@ def _ficha(p: dict, ejec: list[dict], precio_actual) -> None:
 
 # ----------------------------------------------------------------- resumen --
 def _resumen(planes: list[dict], ejec_por_plan: dict, precios: dict) -> None:
-    """Recuento por estado y suma en EUR (tipo de hoy) del latente y del
+    """Recuento por estado, capital asignado (suma de los capitales de todos
+    los planes visibles), capital asignado y ejecutado (capital x peso de las
+    entradas ya ejecutadas) y suma en EUR (tipo de hoy) del latente y del
     realizado simulados. Un plan sin precio o con divisa no convertible no
     suma: se dice cuántos quedan fuera en vez de sumar un cero."""
     conteo: dict[str, int] = {}
     latente_eur = realizado_eur = None
+    asignado = ejecutado = 0.0
     sin_dato = 0
     for p in planes:
         e = ejec_por_plan.get(p["id"], [])
         est = core_paper.estado(p, e)
         conteo[est] = conteo.get(est, 0) + 1
+        if est in PAPER_ESTADOS_ACTIVOS:          # descartados y cerrados ya no tienen capital comprometido
+            cap = core_paper.capitales(p, e)
+            asignado += cap["asignado"]
+            ejecutado += cap["ejecutado"]
         r = core_paper.rendimiento(p, e, (precios.get(p["ticker"]) or {}).get("precio"))
         if not r:
             continue
@@ -242,11 +274,16 @@ def _resumen(planes: list[dict], ejec_por_plan: dict, precios: dict) -> None:
         if es_dato(rea):
             realizado_eur = (realizado_eur or 0.0) + rea
     badges = " ".join(ui.badge(f"{PAPER_ESTADOS[k][0]} {n}", PAPER_ESTADOS[k][1]) for k, n in conteo.items() if k in PAPER_ESTADOS)
-    c1, c2 = st.columns([2, 1])
+    c1, c2, c3 = st.columns([1.6, 1, 1])
     with c1:
         st.markdown(f'<div class="ss-etiqueta">Planes</div><div style="margin:.2rem 0 .6rem">{badges}</div>',
                     unsafe_allow_html=True)
     with c2:
+        ui.metrica("Capital asignado (EUR)", ui.fmt_precio(asignado, "EUR", 0),
+                   f"{sum(1 for p in planes if core_paper.estado(p, ejec_por_plan.get(p['id'], [])) in PAPER_ESTADOS_ACTIVOS)} planes activos")
+        ui.metrica("Asignado y ejecutado (EUR)", ui.fmt_precio(ejecutado, "EUR", 0),
+                   f"{ejecutado / asignado * 100:.0f} % del asignado" if asignado else None)
+    with c3:
         if es_dato(latente_eur) or es_dato(realizado_eur):
             ui.metrica("Latente simulado (EUR)", ui.fmt_precio(latente_eur, "EUR") if es_dato(latente_eur) else TEXTO_ND,
                        f"{sin_dato} sin precio" if sin_dato else None, semaforo=_sem(latente_eur))
@@ -274,9 +311,17 @@ def render() -> None:
                                   label_visibility="collapsed") or "Activos"
     planes = [p for p in todos if core_paper.estado(p, ejec_por_plan.get(p["id"], [])) in FILTROS[filtro]]
 
-    tickers = tuple(sorted({p["ticker"] for p in planes}))
+    # Precios de TODOS los planes activos (no solo los del filtro): la
+    # ejecución automática debe mirar cada plan activo aunque el filtro
+    # muestre otro estado. Un solo lote cubre ambas cosas.
+    activos = [p for p in todos if core_paper.estado(p, ejec_por_plan.get(p["id"], [])) in PAPER_ESTADOS_ACTIVOS]
+    tickers = tuple(sorted({p["ticker"] for p in planes} | {p["ticker"] for p in activos}))
     lote = obtener_precios_lote(tickers, cubo_mercado()) if tickers else None
     precios = (lote.valor or {}) if lote is not None else {}
+    _automaticas(activos, ejec_por_plan, precios)
+    aviso = st.session_state.pop("paper_aviso_auto", None)
+    if aviso:
+        st.success(aviso, icon=":material/bolt:")
 
     _resumen(planes, ejec_por_plan, precios)
     if not planes:
@@ -285,6 +330,6 @@ def render() -> None:
     columnas = st.columns(3)
     for i, p in enumerate(planes):
         with columnas[i % 3]:
-            _ficha(p, ejec_por_plan.get(p["id"], []), (precios.get(p["ticker"]) or {}).get("precio"))
+            _ficha(p, ejec_por_plan.get(p["id"], []), precios.get(p["ticker"]) or {})
     if lote is not None:
         ui.frescura(lote.obtenido_en, lote.fuente, "precio")

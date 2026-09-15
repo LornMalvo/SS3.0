@@ -25,10 +25,23 @@ from config_settings import (
     CARTERA_CORRELACION_ALTA,
     CARTERA_CORRELACION_MIN_SESIONES,
     CARTERA_PESO_ALERTA,
+    CARTERA_RECO_AMPLIAR_MAX,
+    CARTERA_RECO_GANANCIA_PARCIAL,
+    CARTERA_RECO_GANANCIA_PROTEGER,
+    CARTERA_RECO_PERDIDA_REDUCIR,
+    CARTERA_RECO_PERDIDA_VENDER,
     CARTERA_SECTOR_ALERTA,
     CARTERA_TOLERANCIA_ACCIONES,
+    INDICADOR_VENTANAS,
+    MOMENTUM_MIN_SESIONES,
+    MOMENTUM_NIVELES,
+    MOMENTUM_RSI_SOBRECOMPRA,
+    MOMENTUM_TRAMOS,
+    RECO_VEREDICTOS_VETO_AMPLIAR,
+    RECOMENDACIONES,
 )
-from core_ponderar import es_dato
+from core_indicadores import macd, media_movil, rsi
+from core_ponderar import es_dato, puntuar_tramos
 
 
 def _f(v, defecto: float = 0.0) -> float:
@@ -300,3 +313,119 @@ def correlacion(cierres: pd.DataFrame | None) -> tuple[pd.DataFrame | None, list
                 pares.append({"a": a, "b": b, "corr": float(v)})
     pares.sort(key=lambda d: -d["corr"])
     return m, pares
+
+
+# ------------------------------------------------------- variación diaria --
+def variacion_diaria(posiciones: dict[str, dict], cierres_nativos: dict[str, pd.Series] | None,
+                     cierres_eur: pd.DataFrame | None) -> dict[str, dict]:
+    """Añade a cada posición abierta `var_dia_pct` (variación de la sesión en
+    la divisa de cotización: es el movimiento del valor, sin ruido de divisa)
+    y `var_dia_eur` (acciones x diferencia de cierres en EUR: lo que de
+    verdad ha ganado o perdido hoy la posición, divisa incluida). En sesión
+    la última fila del lote es el precio en vivo y la anterior el cierre de
+    ayer; fuera de sesión son los dos últimos cierres."""
+    for t, p in posiciones.items():
+        if p["cerrada"]:
+            continue
+        p["var_dia_pct"] = p["var_dia_eur"] = None
+        serie = (cierres_nativos or {}).get(t)
+        if serie is not None and len(serie.dropna()) >= 2:
+            v = serie.dropna()
+            if v.iloc[-2]:
+                p["var_dia_pct"] = float(v.iloc[-1] / v.iloc[-2] - 1) * 100
+        if cierres_eur is not None and t in getattr(cierres_eur, "columns", []):
+            v = cierres_eur[t].dropna()
+            if len(v) >= 2:
+                p["var_dia_eur"] = p["acciones"] * float(v.iloc[-1] - v.iloc[-2])
+    return posiciones
+
+
+# --------------------------------------------------------------- momentum --
+def momentum(cierres: pd.Series | None) -> dict | None:
+    """Índice de momentum 0-100 de un valor a partir de sus cierres diarios
+    (divisa de cotización). Cinco componentes puntuados por tramos
+    (MOMENTUM_TRAMOS) y promediados a partes iguales; nivel -2..+2 y etiqueta
+    por MOMENTUM_NIVELES. None con menos de MOMENTUM_MIN_SESIONES cierres.
+    El MACD se normaliza por el precio (histograma en % del cierre): aquí no
+    hay ATR porque solo se dispone de cierres, y el orden de magnitud es el
+    mismo que el del Timing para un ATR del 1-2 %."""
+    if cierres is None:
+        return None
+    serie = cierres.dropna().astype(float)
+    if len(serie) < MOMENTUM_MIN_SESIONES:
+        return None
+    df = pd.DataFrame({"Close": serie})
+    precio = float(serie.iloc[-1])
+    v = INDICADOR_VENTANAS
+    mm50 = media_movil(df, v["mm50"]).iloc[-1]
+    mm200 = media_movil(df, v["mm200"]).iloc[-1]
+    hist = macd(df)["hist"].iloc[-1]
+    crudos = {
+        "rsi": float(rsi(df, v["rsi"]).iloc[-1]),
+        "dist_mm50": (precio / mm50 - 1) * 100 if es_dato(mm50) and mm50 else None,
+        "dist_mm200": (precio / mm200 - 1) * 100 if es_dato(mm200) and mm200 else None,
+        "ret_20": (precio / float(serie.iloc[-21]) - 1) * 100 if len(serie) > 21 and serie.iloc[-21] else None,
+        "macd": (hist / precio * 100) if es_dato(hist) and precio else None,
+    }
+    puntos = {k: puntuar_tramos(val, MOMENTUM_TRAMOS[k]) for k, val in crudos.items() if es_dato(val)}
+    if not puntos:
+        return None
+    nota = sum(puntos.values()) / len(puntos)
+    nivel, etiqueta = next((n, e) for minimo, n, e in MOMENTUM_NIVELES if nota >= minimo)
+    return {"nota": nota, "nivel": nivel, "etiqueta": etiqueta, "componentes": crudos, "puntos": puntos,
+            "sobrecompra": es_dato(crudos["rsi"]) and crudos["rsi"] >= MOMENTUM_RSI_SOBRECOMPRA}
+
+
+# ---------------------------------------------------------- recomendación --
+def recomendar(latente_pct: float | None, mom: dict | None, ultimo_analisis: dict | None = None) -> dict | None:
+    """Qué hacer con una posición abierta. Matriz latente x momentum con
+    motivo en una frase; el último veredicto guardado del ticker (si lo
+    hay) solo actúa como veto sobre AMPLIAR. None sin latente o sin
+    momentum: no se recomienda a ciegas.
+
+    Por debajo del coste medio:
+      pérdida <= VENDER  y momentum bajista fuerte -> VENDER (tesis técnica rota)
+      pérdida <= REDUCIR y momentum bajista        -> REDUCIR (no promediar contra la tendencia)
+      giro alcista confirmado                      -> AMPLIAR (promediar a la baja con la tendencia a favor)
+      resto                                        -> ESPERAR
+    Por encima del coste medio:
+      momentum bajista fuerte                      -> REDUCIR (proteger lo ganado)
+      ganancia >= PARCIAL con sobrecompra o giro   -> VENTA PARCIAL
+      ganancia >= PROTEGER con momentum bajista    -> VENTA PARCIAL
+      momentum alcista fuerte cerca del coste      -> AMPLIAR (piramidar)
+      resto                                        -> MANTENER (dejar correr)"""
+    if not es_dato(latente_pct) or not mom:
+        return None
+    nivel, etiqueta_mom = mom["nivel"], mom["etiqueta"]
+    veredicto = (ultimo_analisis or {}).get("veredicto")
+    veto = veredicto in RECO_VEREDICTOS_VETO_AMPLIAR
+
+    def r(clave: str, motivo: str) -> dict:
+        etiqueta, color = RECOMENDACIONES[clave]
+        if clave == "ampliar" and veto:
+            etiqueta, color = RECOMENDACIONES["esperar"]
+            return {"clave": "esperar", "etiqueta": etiqueta, "color": color,
+                    "motivo": f"{motivo}; pero el último análisis dice {veredicto}: no se amplía lo que el motor no compraría hoy"}
+        return {"clave": clave, "etiqueta": etiqueta, "color": color, "motivo": motivo}
+
+    lat = f"{latente_pct:+.1f} %".replace(".", ",")
+    if latente_pct < 0:
+        if latente_pct <= CARTERA_RECO_PERDIDA_VENDER and nivel <= -2:
+            return r("vender", f"pérdida {lat} con momentum {etiqueta_mom}: la tendencia no acompaña y la pérdida ya es grande")
+        if latente_pct <= CARTERA_RECO_PERDIDA_REDUCIR and nivel <= -1:
+            return r("reducir", f"pérdida {lat} con momentum {etiqueta_mom}: no conviene promediar contra la tendencia")
+        if nivel >= 1:
+            return r("ampliar", f"precio bajo el coste medio ({lat}) con momentum {etiqueta_mom}: promediar a la baja con la tendencia girada")
+        if nivel <= -1:
+            return r("esperar", f"pérdida {lat} contenida pero momentum {etiqueta_mom}: esperar a que gire antes de decidir")
+        return r("esperar", f"pérdida {lat} con momentum {etiqueta_mom}: sin señal para ampliar ni para reducir")
+    if nivel <= -2:
+        return r("reducir", f"ganancia {lat} con momentum {etiqueta_mom}: proteger lo ganado antes de que se evapore")
+    if latente_pct >= CARTERA_RECO_GANANCIA_PARCIAL and (mom.get("sobrecompra") or nivel <= -1):
+        causa = "sobrecompra (RSI alto)" if mom.get("sobrecompra") else f"momentum {etiqueta_mom}"
+        return r("venta_parcial", f"ganancia {lat} con {causa}: recoger una parte y dejar correr el resto")
+    if latente_pct >= CARTERA_RECO_GANANCIA_PROTEGER and nivel <= -1:
+        return r("venta_parcial", f"ganancia {lat} con momentum {etiqueta_mom}: asegurar parte del beneficio")
+    if nivel >= 2 and latente_pct < CARTERA_RECO_AMPLIAR_MAX:
+        return r("ampliar", f"ganancia {lat} cerca del coste con momentum {etiqueta_mom}: piramidar a favor de tendencia")
+    return r("mantener", f"ganancia {lat} con momentum {etiqueta_mom}: la posición funciona, dejar correr")
