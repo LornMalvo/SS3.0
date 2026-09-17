@@ -6,7 +6,7 @@ on:
   schedule:
     - cron: "5 13-21 * * 1-5"
   workflow_dispatch:
-  inputs:
+    inputs:
       prueba:
         description: 'Modo prueba (envía mensaje OK sin evaluar)'
         type: boolean
