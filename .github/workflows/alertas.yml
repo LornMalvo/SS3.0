@@ -6,6 +6,15 @@ on:
   schedule:
     - cron: "5 13-21 * * 1-5"
   workflow_dispatch:
+  inputs:
+      prueba:
+        description: 'Modo prueba (envía mensaje OK sin evaluar)'
+        type: boolean
+        default: false
+      simular:
+        description: 'Modo simular (evalúa e imprime sin enviar)'
+        type: boolean
+        default: false
 jobs:
   alertas:
     runs-on: ubuntu-latest
