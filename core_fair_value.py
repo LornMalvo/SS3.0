@@ -7,7 +7,19 @@ de la sesión 1 y en config_settings.FV_PESOS):
   C peg             PEG objetivo x crecimiento estimado (%) x BPA forward
   D ev_ebitda       EV/EBITDA sector x EBITDA, menos deuda, más caja, / acciones
   E ev_ventas       EV/Ventas sector (solo perfil pre_rentabilidad)
+  F pb              P/B de referencia x valor contable por acción (financieras)
+  G p_ffo           P/FFO de referencia x FFO por acción (REITs)
   consenso          precio objetivo medio de analistas (peso FIJO)
+
+Referencias (sesión 6): "del sector" significa core_referencias: mediana
+de los comparables validados del ticker, si no la mediana real del sector
+que calcula el rastreo nocturno, y solo en último lugar la semilla de
+config_sectores. Cada método enseña qué referencia usó.
+
+Perfiles: rentable (A-D + consenso), pre_rentabilidad (E, D, consenso),
+financiera (A, B, C, F, consenso: EV/EBITDA no es magnitud válida cuando
+la deuda es el negocio) y REIT (G, D, consenso: el BPA GAAP se lo come la
+amortización del inmueble).
 
 Flujo: métodos -> banda de cordura sobre ancla mixta -> ponderar() -> upside
 -> banda de alerta. Sensibilidad = el mismo flujo con multiplicadores por
@@ -23,6 +35,7 @@ import statistics
 import pandas as pd
 
 import config_sectores as sec
+import core_referencias
 from config_settings import (
     BANDAS_VALORACION,
     FV_BANDA_SUELO,
@@ -38,7 +51,9 @@ from config_settings import (
     FV_PER_HISTORICO_INESTABILIDAD_MAX,
     FV_PER_HISTORICO_MIN_ANIOS,
     FV_PESOS,
+    FV_PESOS_FINANCIERA,
     FV_PESOS_PRE_RENTABILIDAD,
+    FV_PESOS_REIT,
     FV_UPSIDE_ANOMALIA,
     MOTOR_VERSION,
     PERFIL_PRE_RENTABILIDAD,
@@ -52,8 +67,21 @@ ETIQUETAS = {
     "peg": "C · PEG",
     "ev_ebitda": "D · EV/EBITDA sector",
     "ev_ventas": "E · EV/Ventas sector",
+    "pb": "F · Precio / Valor contable",
+    "p_ffo": "G · Precio / FFO",
     "consenso": "Consenso de analistas",
 }
+
+
+def pesos_perfil(fund: dict, perfil: str) -> dict[str, float]:
+    """Qué métodos y con qué peso según el perfil de la empresa."""
+    if perfil == PERFIL_PRE_RENTABILIDAD:
+        return FV_PESOS_PRE_RENTABILIDAD
+    if fund.get("industria") in sec.INDUSTRIAS_REIT:
+        return FV_PESOS_REIT
+    if fund.get("sector") == "Financial Services":
+        return FV_PESOS_FINANCIERA
+    return FV_PESOS
 
 
 # ------------------------------------------------------------ entradas ------
@@ -95,10 +123,11 @@ def crecimiento_estimado(fund: dict) -> float | None:
 
 # ------------------------------------------------------------- métodos ------
 def _metodos(fund: dict, estados: dict | None, historico: pd.DataFrame | None, perfil: str,
-             escenario: dict) -> tuple[dict[str, float | None], dict[str, str]]:
-    sector = fund.get("sector")
+             escenario: dict, refs: dict) -> tuple[dict[str, float | None], dict[str, str]]:
     industria = fund.get("industria")
     reit = industria in sec.INDUSTRIAS_REIT
+    financiera = fund.get("sector") == "Financial Services"
+    ref = lambda clave: core_referencias.valor(refs, clave)  # noqa: E731
     f_mult, f_crec = escenario["multiplo"], escenario["crecimiento"]
     acciones = fund.get("acciones")
     deuda, caja = fund.get("deuda_total") or 0.0, fund.get("caja_total") or 0.0
@@ -112,7 +141,7 @@ def _metodos(fund: dict, estados: dict | None, historico: pd.DataFrame | None, p
         return equity / acciones if equity > 0 else None
 
     if perfil == PERFIL_PRE_RENTABILIDAD:
-        mult = sec.EV_VENTAS_SECTOR.get(sector)
+        mult = ref("ev_ventas")
         ingresos = fund.get("ingresos_ttm")
         if es_dato(mult) and es_dato(ingresos) and ingresos > 0:
             v["ev_ventas"] = desde_ev(mult * f_mult * ingresos)
@@ -124,9 +153,13 @@ def _metodos(fund: dict, estados: dict | None, historico: pd.DataFrame | None, p
     else:
         bpa_ttm, bpa_fwd = fund.get("bpa_ttm"), fund.get("bpa_forward")
         if reit:
-            for k in ("per_historico", "per_forward", "peg"):
-                v[k] = None
-                motivos[k] = "REIT: el BPA GAAP no es magnitud válida (pendiente P/FFO)"
+            # G. P/FFO: la magnitud económica del REIT (BN + amortización).
+            ffo, mult = fund.get("ffo_por_accion"), ref("p_ffo")
+            if es_dato(ffo) and ffo > 0 and es_dato(mult):
+                v["p_ffo"] = mult * f_mult * ffo
+            else:
+                v["p_ffo"] = None
+                motivos["p_ffo"] = "sin FFO por acción positivo" if not (es_dato(ffo) and ffo > 0) else "sin referencia P/FFO"
         else:
             per_h, motivo = per_historico(estados, historico)
             if per_h is not None and es_dato(bpa_ttm) and bpa_ttm > 0:
@@ -135,7 +168,7 @@ def _metodos(fund: dict, estados: dict | None, historico: pd.DataFrame | None, p
                 v["per_historico"] = None
                 motivos["per_historico"] = motivo or "BPA TTM no positivo"
 
-            per_f = sec.PER_FORWARD_SECTOR.get(sector)
+            per_f = ref("per_forward")
             if es_dato(per_f) and es_dato(bpa_fwd) and bpa_fwd > 0:
                 v["per_forward"] = per_f * f_mult * bpa_fwd
             else:
@@ -153,15 +186,24 @@ def _metodos(fund: dict, estados: dict | None, historico: pd.DataFrame | None, p
                 g_ef = acotar(g * f_crec, FV_PEG_CRECIMIENTO_MIN, FV_PEG_CRECIMIENTO_MAX)
                 v["peg"] = FV_PEG_OBJETIVO * (g_ef * 100) * bpa_fwd
 
-    mult = sec.EV_EBITDA_SECTOR.get(sector)
-    ebitda = fund.get("ebitda")
-    if es_dato(mult) and es_dato(ebitda) and ebitda > 0:
-        v["ev_ebitda"] = desde_ev(mult * f_mult * ebitda)
-        if v["ev_ebitda"] is None:
-            motivos["ev_ebitda"] = "valor de los fondos propios no positivo o sin nº de acciones"
+    if financiera and perfil != PERFIL_PRE_RENTABILIDAD:
+        # F. P/B: el múltiplo natural de un banco o aseguradora.
+        vc, mult = fund.get("valor_contable_accion"), ref("precio_valor_contable")
+        if es_dato(vc) and vc > 0 and es_dato(mult):
+            v["pb"] = mult * f_mult * vc
+        else:
+            v["pb"] = None
+            motivos["pb"] = "sin valor contable por acción positivo" if not (es_dato(vc) and vc > 0) else "sin referencia P/B"
     else:
-        v["ev_ebitda"] = None
-        motivos["ev_ebitda"] = "EBITDA no positivo" if es_dato(ebitda) else "sin EBITDA o sin sector"
+        mult = ref("ev_ebitda")
+        ebitda = fund.get("ebitda")
+        if es_dato(mult) and es_dato(ebitda) and ebitda > 0:
+            v["ev_ebitda"] = desde_ev(mult * f_mult * ebitda)
+            if v["ev_ebitda"] is None:
+                motivos["ev_ebitda"] = "valor de los fondos propios no positivo o sin nº de acciones"
+        else:
+            v["ev_ebitda"] = None
+            motivos["ev_ebitda"] = "EBITDA no positivo" if es_dato(ebitda) else "sin EBITDA o sin referencia"
 
     n = fund.get("n_analistas")
     clave_obj = {"bajo": "objetivo_bajo", "medio": "objetivo_medio", "alto": "objetivo_alto"}[escenario["consenso"]]
@@ -210,10 +252,10 @@ def banda_valoracion(upside_pct: float | None) -> tuple[str, str] | None:
     return None
 
 
-def _valorar(fund, estados, historico, precio, perfil, escenario) -> dict:
-    brutos, motivos = _metodos(fund, estados, historico, perfil, escenario)
+def _valorar(fund, estados, historico, precio, perfil, escenario, refs) -> dict:
+    brutos, motivos = _metodos(fund, estados, historico, perfil, escenario, refs)
     ajustados, estados_banda = _banda_cordura(brutos)
-    pesos = FV_PESOS_PRE_RENTABILIDAD if perfil == PERFIL_PRE_RENTABILIDAD else FV_PESOS
+    pesos = pesos_perfil(fund, perfil)
     componentes = {k: (p, ajustados.get(k)) for k, p in pesos.items()}
     p = ponderar(componentes, motivos={**motivos, **{k: "fuera de la banda de cordura" for k, e in estados_banda.items() if e == "excluido"}})
     fv = p.valor
@@ -223,17 +265,25 @@ def _valorar(fund, estados, historico, precio, perfil, escenario) -> dict:
         estado = estados_banda.get(k) or ("excluido" if brutos.get(k) is None else "usado")
         detalle[k] = {"etiqueta": ETIQUETAS[k], "bruto": brutos.get(k), "usado": ajustados.get(k),
                       "peso": peso, "peso_efectivo": p.usados.get(k), "estado": estado,
-                      "motivo": p.excluidos.get(k)}
+                      "motivo": p.excluidos.get(k),
+                      "referencia": core_referencias.etiqueta(refs, _CLAVE_REF.get(k, ""))}
     return {"fair_value": fv, "upside_pct": upside, "cobertura": p.cobertura, "metodos": detalle}
 
 
+# Método -> clave de referencia que usa (para enseñar de dónde sale).
+_CLAVE_REF = {"per_forward": "per_forward", "ev_ebitda": "ev_ebitda", "ev_ventas": "ev_ventas",
+              "pb": "precio_valor_contable", "p_ffo": "p_ffo"}
+
+
 def calcular(fund: dict, estados: dict | None, historico: pd.DataFrame | None, precio: float | None,
-             perfil: str) -> dict:
-    base = _valorar(fund, estados, historico, precio, perfil, FV_ESCENARIOS["base"])
+             perfil: str, referencias: dict | None = None) -> dict:
+    """`referencias`: core_referencias.construir; sin ellas, semilla del sector."""
+    refs = referencias or core_referencias.solo_semilla(fund.get("sector"), fund.get("industria"))
+    base = _valorar(fund, estados, historico, precio, perfil, FV_ESCENARIOS["base"], refs)
     sensibilidad = {
         nombre: {k: r[k] for k in ("fair_value", "upside_pct")}
         for nombre, esc in FV_ESCENARIOS.items()
-        for r in [base if nombre == "base" else _valorar(fund, estados, historico, precio, perfil, esc)]
+        for r in [base if nombre == "base" else _valorar(fund, estados, historico, precio, perfil, esc, refs)]
     }
     avisos = []
     if fund.get("divisa") and (fund.get("divisa_cotizacion") or fund.get("divisa")) != fund.get("divisa"):
@@ -246,6 +296,8 @@ def calcular(fund: dict, estados: dict | None, historico: pd.DataFrame | None, p
         "precio": precio,
         "perfil": perfil,
         "banda": banda_valoracion(up),
+        "referencias": refs.get("dominante"),
+        "n_peers": refs.get("n_peers", 0),
         "sensibilidad": sensibilidad,
         "avisos": avisos,
         "anomalia": bool(avisos),

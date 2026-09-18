@@ -1,13 +1,14 @@
 """Tablas de referencia por sector (clasificación de yfinance).
 
 SEMILLA orientativa: valores de orden de magnitud para arrancar los motores
-sin bloquear el desarrollo. Cada motor las trata como "referencia local" y
-las usa solo cuando no puede calcular la mediana con comparables reales.
-PENDIENTE (sesión 5): `tarea_tablas_sector.py` que las regenere a partir de
-comparables descargados por lote y las persista en Supabase con fecha.
+sin bloquear el desarrollo. Desde la sesión 6 son el ÚLTIMO escalón de
+core_referencias: cada motor prefiere la mediana de los comparables
+validados del ticker y, si no, la mediana real del sector que calcula el
+rastreo nocturno (`sector_referencias`); solo sin ninguna de las dos se
+usa esta tabla, y la interfaz lo etiqueta como "sector (semilla)".
 
-Ningún valor de aquí se toma como verdad: al mostrarse en la interfaz se
-etiqueta como "ref. sector (semilla)" y cuenta como fuente de baja frescura.
+Las claves de cada tabla coinciden con las de core_fundamentales.extraer /
+la tabla `multiplos` (ver REFERENCIAS_SEMILLA al final).
 """
 
 SECTORES = [
@@ -30,6 +31,15 @@ EV_EBITDA_SECTOR = {
     "Consumer Cyclical": 12.0, "Consumer Defensive": 13.0, "Energy": 7.0,
     "Financial Services": 12.0, "Healthcare": 15.0, "Industrials": 14.0,
     "Real Estate": 18.0, "Technology": 20.0, "Utilities": 12.0,
+}
+
+# Precio / Valor contable mediano: múltiplo natural de las financieras
+# (método P/B del Fair Value, sesión 6).
+PB_SECTOR = {
+    "Basic Materials": 2.0, "Communication Services": 2.5,
+    "Consumer Cyclical": 3.5, "Consumer Defensive": 3.5, "Energy": 1.8,
+    "Financial Services": 1.3, "Healthcare": 4.0, "Industrials": 3.5,
+    "Real Estate": 1.8, "Technology": 6.0, "Utilities": 1.8,
 }
 
 # EV/Ventas mediano: único múltiplo utilizable en pre-rentabilidad.
@@ -103,4 +113,21 @@ ETF_SECTORIAL = {
     "Consumer Cyclical": "XLY", "Consumer Defensive": "XLP", "Healthcare": "XLV",
     "Financial Services": "XLF", "Industrials": "XLI", "Energy": "XLE",
     "Basic Materials": "XLB", "Utilities": "XLU", "Real Estate": "XLRE",
+}
+
+# Tabla semilla por clave de múltiplo/margen (mismas claves que la tabla
+# `multiplos` y que core_fundamentales.extraer). core_referencias la usa
+# como último escalón.
+REFERENCIAS_SEMILLA = {
+    "per_forward": PER_FORWARD_SECTOR,
+    "ev_ebitda": EV_EBITDA_SECTOR,
+    "ev_ventas": EV_VENTAS_SECTOR,
+    "precio_valor_contable": PB_SECTOR,
+    "peg": PEG_SECTOR,
+    "margen_bruto": MARGEN_BRUTO_SECTOR,
+    "margen_operativo": MARGEN_OPERATIVO_SECTOR,
+    "margen_neto": MARGEN_NETO_SECTOR,
+    "roe": ROE_SECTOR,
+    "roic": ROIC_SECTOR,
+    "deuda_neta_ebitda": DEUDA_NETA_EBITDA_SECTOR,
 }

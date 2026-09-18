@@ -327,9 +327,9 @@ def render() -> None:
     if not planes:
         ui.nd(f"Sin planes en «{filtro}».")
         return
-    columnas = st.columns(3)
-    for i, p in enumerate(planes):
-        with columnas[i % 3]:
-            _ficha(p, ejec_por_plan.get(p["id"], []), precios.get(p["ticker"]) or {})
+    # Rejilla fila a fila (ui.rejilla): las fichas tienen alturas distintas
+    # (vigilando vs abierto, con o sin "Descartar") y un único st.columns
+    # desalineaba los bordes superiores a partir de la segunda fila.
+    ui.rejilla(planes, lambda p: _ficha(p, ejec_por_plan.get(p["id"], []), precios.get(p["ticker"]) or {}))
     if lote is not None:
         ui.frescura(lote.obtenido_en, lote.fuente, "precio")

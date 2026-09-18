@@ -52,27 +52,39 @@ def fmt_pct(valor, decimales: int = 1, signo: bool = True) -> str:
 
 
 def fmt_grande(valor) -> str:
-    """Capitalización, EBITDA... en M/B con separador español."""
+    """Importe grande en MILLONES enteros ("2960 M", "3.500.000 M"): un solo
+    orden de magnitud en toda la app, así "2960 M$ (2580 M€)" se lee de un
+    vistazo y sin la ambigüedad de mM/B (decisión de Samuel, sesión 6).
+    Sin separador de miles hasta cuatro cifras (convención española); por
+    debajo de un millón se muestra el número tal cual."""
     if not es_dato(valor):
         return TEXTO_ND
     v = float(valor)
-    for umbral, letra in ((1e12, "B"), (1e9, "mM"), (1e6, "M")):
-        if abs(v) >= umbral:
-            return f"{fmt_num(v / umbral, 2)} {letra}"
-    return fmt_num(v, 0)
+    if abs(v) < 1e6:
+        return fmt_num(v, 0)
+    millones = round(v / 1e6)
+    txt = f"{millones}" if abs(millones) < 10000 else fmt_num(millones, 0)
+    return f"{txt} M"
+
+
+def _con_simbolo(texto: str, simbolo: str) -> str:
+    """"2960 M" + "$" -> "2960 M$"; "850.000" + "$" -> "850.000 $"."""
+    if not simbolo:
+        return texto
+    return f"{texto}{simbolo}" if texto.endswith(" M") else f"{texto} {simbolo}"
 
 
 def fmt_importe(valor, divisa: str | None) -> str:
     """Importe grande (capitalización, caja, FCF) en su divisa y, si no es
-    EUR, su conversión entre paréntesis."""
+    EUR, su conversión entre paréntesis: "2960 M$ (2580 M€)"."""
     if not es_dato(valor):
         return TEXTO_ND
     simbolo = {"USD": "$", "EUR": "€", "GBP": "£"}.get(divisa or "", divisa or "")
-    base = f"{fmt_grande(valor)} {simbolo}".strip()
+    base = _con_simbolo(fmt_grande(valor), simbolo)
     if divisa == "EUR" or not divisa:
         return base
     eur, _ = convertir_a_eur(valor, divisa)
-    return f"{base} ({fmt_grande(eur)} €)" if eur is not None else base
+    return f"{base} ({_con_simbolo(fmt_grande(eur), '€')})" if eur is not None else base
 
 
 def fmt_precio(valor, divisa: str | None, decimales: int = 2) -> str:
@@ -152,6 +164,20 @@ def frescura(obtenido_en: datetime | None, fuente: str, tipo: str) -> None:
 
 def pendiente(texto: str) -> None:
     st.markdown(f'<div class="ss-pendiente">{texto}</div>', unsafe_allow_html=True)
+
+
+def rejilla(elementos: list, pintar, columnas: int = 3) -> None:
+    """Fichas en una rejilla de N columnas FILA A FILA: cada fila es un
+    `st.columns` nuevo, así los bordes superiores de las fichas de una misma
+    fila quedan alineados aunque las fichas tengan alturas distintas (con
+    un solo st.columns cada columna apila a su ritmo y la segunda fila se
+    desalinea, que era lo que pasaba en Paper Trading). `pintar(elemento)`
+    dibuja una ficha."""
+    for i in range(0, len(elementos), columnas):
+        cols = st.columns(columnas)
+        for col, e in zip(cols, elementos[i:i + columnas]):
+            with col:
+                pintar(e)
 
 
 def nd(texto: str = TEXTO_ND) -> None:

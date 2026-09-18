@@ -72,28 +72,46 @@ def alternar_favorito(ticker: str) -> bool:
 
 
 # -------------------------------------------------------------- anotaciones --
-def leer_anotacion(ticker: str) -> str:
+# Desde la sesión 6 cada nota es una fila con su fecha (anotaciones_entradas);
+# la tabla `anotaciones` (un texto por ticker) queda migrada por la 004.
+def listar_anotaciones(ticker: str) -> list[dict]:
+    """Notas del ticker, más reciente primero: [{id, texto, creado_en}]."""
     cli = _cliente()
     if cli is None:
-        return _memoria("anotaciones", {}).get(ticker, "")
+        return list(reversed(_memoria("anotaciones", {}).get(ticker, [])))
     try:
-        filas = cli.table("anotaciones").select("texto").eq("ticker", ticker).limit(1).execute().data
-        return filas[0]["texto"] if filas else ""
+        return (cli.table("anotaciones_entradas").select("id,texto,creado_en").eq("ticker", ticker)
+                .order("creado_en", desc=True).execute().data or [])
     except Exception:
-        return ""
+        return []
 
 
-def guardar_anotacion(ticker: str, texto: str) -> bool:
+def anadir_anotacion(ticker: str, texto: str) -> bool:
+    """Añade una nota; la fecha la pone la base de datos (o el reloj local
+    sin Supabase) y viaja siempre con la nota."""
+    texto = (texto or "").strip()
+    if not texto:
+        return False
     cli = _cliente()
     if cli is None:
-        _memoria("anotaciones", {})[ticker] = texto
+        notas = _memoria("anotaciones", {}).setdefault(ticker, [])
+        notas.append({"id": -(len(notas) + 1), "texto": texto, "creado_en": datetime.now(timezone.utc).isoformat()})
         return True
     try:
-        cli.table("anotaciones").upsert({
-            "ticker": ticker,
-            "texto": texto,
-            "actualizado_en": datetime.now(timezone.utc).isoformat(),
-        }).execute()
+        cli.table("anotaciones_entradas").insert({"ticker": ticker, "texto": texto}).execute()
+        return True
+    except Exception:
+        return False
+
+
+def eliminar_anotacion(ticker: str, nota_id: int) -> bool:
+    cli = _cliente()
+    if cli is None:
+        notas = _memoria("anotaciones", {}).get(ticker, [])
+        notas[:] = [n for n in notas if n.get("id") != nota_id]
+        return True
+    try:
+        cli.table("anotaciones_entradas").delete().eq("id", nota_id).execute()
         return True
     except Exception:
         return False
@@ -113,17 +131,46 @@ def registrar_decision(ticker: str, accion: str, motivo: str, plan_id: int | Non
         pass
 
 
-def guardar_analisis(fila: dict) -> None:
+def guardar_analisis(fila: dict) -> bool:
     """Histórico de análisis con deduplicación por (ticker, fecha, versión)."""
     cli = _cliente()
     if cli is None:
-        return
+        return False
     try:
         cli.table("analisis_historico").upsert(
             fila, on_conflict="ticker,fecha_analisis,motor_version"
         ).execute()
+        return True
     except Exception:
-        pass
+        return False
+
+
+def listar_screener(desde: str, origen: str = "cron") -> list[dict]:
+    """Último análisis persistido de cada ticker con ese origen desde la
+    fecha indicada (modo Screener del Rastreador): UNA consulta paginada,
+    el más reciente de cada ticker manda. Sin JSON de entradas ni plan."""
+    from config_settings import SCREENER_MAX_FILAS
+    cli = _cliente()
+    if cli is None:
+        return []
+    columnas = ("ticker,fecha_analisis,motor_version,precio,divisa,nombre,sector,calidad,fair_value,upside_pct,"
+                "timing,timing_bruto,senal_timing,veredicto,perfil,banda,plan")
+    filas: list[dict] = []
+    try:
+        paso = 1000
+        for inicio in range(0, SCREENER_MAX_FILAS, paso):
+            lote = (cli.table("analisis_historico").select(columnas).eq("origen", origen)
+                    .gte("fecha_analisis", desde).order("fecha_analisis", desc=True).order("id", desc=True)
+                    .range(inicio, inicio + paso - 1).execute().data or [])
+            filas += lote
+            if len(lote) < paso:
+                break
+    except Exception:
+        return []
+    ultimos: dict[str, dict] = {}
+    for f in filas:
+        ultimos.setdefault(f["ticker"], f)
+    return list(ultimos.values())
 
 
 # ------------------------------------------------------------ paper trading --
@@ -312,24 +359,37 @@ def sectores_conocidos(tickers: tuple[str, ...]) -> dict[str, str]:
     return {t: a["sector"] for t, a in ultimos_analisis(tickers).items() if a.get("sector")}
 
 
-def listar_analisis(desde: str | None = None, hasta: str | None = None) -> list[dict]:
+def listar_analisis(desde: str | None = None, hasta: str | None = None,
+                    origenes: tuple[str, ...] | None = ("individual", "rastreador")) -> list[dict]:
     """Filas de `analisis_historico` (sin el JSON de entradas) para la
-    evaluación de señales del Rastreador: una consulta, más antigua primero."""
+    evaluación de señales del Rastreador, paginadas, más antigua primero.
+    Por defecto EXCLUYE el origen 'cron': 500 filas por noche harían
+    inabarcable la descarga de cierres de la evaluación; las señales del
+    screener se evalúan cuando se abren en vivo o individualmente."""
     cli = _cliente()
     if cli is None:
         return []
+    filas: list[dict] = []
     try:
-        q = (cli.table("analisis_historico")
-             .select("id,ticker,fecha_analisis,motor_version,precio,divisa,calidad,fair_value,upside_pct,timing,"
-                     "senal_timing,veredicto,plan")
-             .order("fecha_analisis"))
-        if desde:
-            q = q.gte("fecha_analisis", desde)
-        if hasta:
-            q = q.lte("fecha_analisis", hasta)
-        return q.execute().data or []
+        paso = 1000
+        for inicio in range(0, 20000, paso):
+            q = (cli.table("analisis_historico")
+                 .select("id,ticker,fecha_analisis,motor_version,precio,divisa,calidad,fair_value,upside_pct,timing,"
+                         "senal_timing,veredicto,plan,origen")
+                 .order("fecha_analisis").order("id"))
+            if desde:
+                q = q.gte("fecha_analisis", desde)
+            if hasta:
+                q = q.lte("fecha_analisis", hasta)
+            if origenes:
+                q = q.in_("origen", list(origenes))
+            lote = q.range(inicio, inicio + paso - 1).execute().data or []
+            filas += lote
+            if len(lote) < paso:
+                break
     except Exception:
-        return []
+        return filas
+    return filas
 
 
 def guardar_backtest(filas: list[dict]) -> bool:
@@ -446,6 +506,230 @@ def quitar_universo(ticker: str) -> bool:
         return True
     except Exception:
         return False
+
+
+# ------------------------------------------------------------ comparables --
+# Peer to peer (sesión 6). Un comparable MANUAL se guarda en las dos
+# direcciones (si AMD es competencia de NVDA, NVDA lo es de AMD) y se quita
+# de las dos; una sugerencia de Finnhub solo vive en la dirección en que se
+# sembró, y al descartarla se marca 'rechazado' para no volver a sembrarla.
+def listar_comparables(ticker: str) -> list[dict]:
+    """[{peer, origen}] incluyendo los rechazados (el consumidor filtra)."""
+    cli = _cliente()
+    if cli is None:
+        return [{"peer": p, "origen": o} for p, o in _memoria("comparables", {}).get(ticker, {}).items()]
+    try:
+        return cli.table("comparables").select("peer,origen").eq("ticker", ticker).order("peer").execute().data or []
+    except Exception:
+        return []
+
+
+def _comp_mem(ticker: str) -> dict:
+    return _memoria("comparables", {}).setdefault(ticker, {})
+
+
+def sembrar_comparables(ticker: str, peers: list[str]) -> bool:
+    """Guarda las sugerencias de Finnhub (origen 'finnhub') sin pisar filas
+    ya existentes (manuales o rechazadas)."""
+    peers = [p for p in dict.fromkeys(p.strip().upper() for p in peers) if p and p != ticker]
+    if not peers:
+        return True
+    cli = _cliente()
+    if cli is None:
+        m = _comp_mem(ticker)
+        for p in peers:
+            m.setdefault(p, "finnhub")
+        return True
+    try:
+        existentes = {f["peer"] for f in listar_comparables(ticker)}
+        nuevos = [{"ticker": ticker, "peer": p, "origen": "finnhub"} for p in peers if p not in existentes]
+        if nuevos:
+            cli.table("comparables").insert(nuevos).execute()
+        return True
+    except Exception:
+        return False
+
+
+def anadir_comparable(ticker: str, peer: str) -> bool:
+    """Alta manual simétrica: (ticker, peer) y (peer, ticker) con origen
+    'manual' (sustituye a 'finnhub' o 'rechazado' si existían)."""
+    peer = (peer or "").strip().upper()
+    if not peer or peer == ticker:
+        return False
+    cli = _cliente()
+    if cli is None:
+        _comp_mem(ticker)[peer] = "manual"
+        _comp_mem(peer)[ticker] = "manual"
+        return True
+    try:
+        cli.table("comparables").upsert([{"ticker": ticker, "peer": peer, "origen": "manual"},
+                                         {"ticker": peer, "peer": ticker, "origen": "manual"}],
+                                        on_conflict="ticker,peer").execute()
+        return True
+    except Exception:
+        return False
+
+
+def quitar_comparable(ticker: str, peer: str, origen: str) -> bool:
+    """Baja: un manual desaparece en las dos direcciones; una sugerencia de
+    Finnhub pasa a 'rechazado'."""
+    cli = _cliente()
+    if cli is None:
+        if origen == "manual":
+            _comp_mem(ticker).pop(peer, None)
+            _comp_mem(peer).pop(ticker, None)
+        else:
+            _comp_mem(ticker)[peer] = "rechazado"
+        return True
+    try:
+        if origen == "manual":
+            cli.table("comparables").delete().eq("ticker", ticker).eq("peer", peer).execute()
+            cli.table("comparables").delete().eq("ticker", peer).eq("peer", ticker).execute()
+        else:
+            cli.table("comparables").upsert({"ticker": ticker, "peer": peer, "origen": "rechazado"},
+                                            on_conflict="ticker,peer").execute()
+        return True
+    except Exception:
+        return False
+
+
+# --------------------------------------------------------------- múltiplos --
+def leer_multiplos(tickers: tuple[str, ...]) -> dict[str, dict]:
+    """{ticker: {nombre, sector, industria, divisa, valores, actualizado_en}}
+    en UNA consulta."""
+    cli = _cliente()
+    if cli is None:
+        m = _memoria("multiplos", {})
+        return {t: m[t] for t in tickers if t in m}
+    if not tickers:
+        return {}
+    try:
+        filas = cli.table("multiplos").select("*").in_("ticker", list(tickers)).execute().data or []
+        return {f["ticker"]: f for f in filas}
+    except Exception:
+        return {}
+
+
+def guardar_multiplos(fila: dict) -> bool:
+    """Upsert de los múltiplos de un ticker (cada análisis, propio o de
+    comparable, refresca su fila)."""
+    cli = _cliente()
+    fila = {**fila, "actualizado_en": datetime.now(timezone.utc).isoformat()}
+    if cli is None:
+        _memoria("multiplos", {})[fila["ticker"]] = fila
+        return True
+    try:
+        cli.table("multiplos").upsert(fila, on_conflict="ticker").execute()
+        return True
+    except Exception:
+        return False
+
+
+def listar_multiplos_todos() -> list[dict]:
+    """Toda la tabla (para recalcular las medianas por sector en el cron)."""
+    cli = _cliente()
+    if cli is None:
+        return list(_memoria("multiplos", {}).values())
+    filas: list[dict] = []
+    try:
+        paso = 1000
+        for inicio in range(0, 20000, paso):
+            lote = cli.table("multiplos").select("ticker,sector,valores,actualizado_en").range(inicio, inicio + paso - 1).execute().data or []
+            filas += lote
+            if len(lote) < paso:
+                break
+    except Exception:
+        return filas
+    return filas
+
+
+def leer_sector_referencias(sector: str | None) -> dict | None:
+    """{referencias: {clave: {mediana, n}}, n, actualizado_en} del sector."""
+    cli = _cliente()
+    if cli is None or not sector:
+        return None
+    try:
+        filas = cli.table("sector_referencias").select("*").eq("sector", sector).limit(1).execute().data
+        return filas[0] if filas else None
+    except Exception:
+        return None
+
+
+def guardar_sector_referencias(filas: list[dict]) -> bool:
+    cli = _cliente()
+    if cli is None or not filas:
+        return False
+    try:
+        ahora = datetime.now(timezone.utc).isoformat()
+        cli.table("sector_referencias").upsert([{**f, "actualizado_en": ahora} for f in filas],
+                                               on_conflict="sector").execute()
+        return True
+    except Exception:
+        return False
+
+
+# -------------------------------------------------------- índices y pases --
+def listar_indices() -> list[dict]:
+    """Índices conocidos por el rastreo nocturno: [{nombre, activo, tickers, n, actualizado_en}]."""
+    cli = _cliente()
+    if cli is None:
+        return list(_memoria("indices", {}).values())
+    try:
+        return cli.table("rastreador_indices").select("*").order("nombre").execute().data or []
+    except Exception:
+        return []
+
+
+def guardar_indice(nombre: str, tickers: list[str] | None = None, activo: bool | None = None) -> bool:
+    """Crea o actualiza un índice: sus constituyentes (con fecha) y/o si
+    está activo para el rastreo nocturno."""
+    cli = _cliente()
+    fila: dict = {"nombre": nombre}
+    if tickers is not None:
+        fila.update({"tickers": tickers, "n": len(tickers), "actualizado_en": datetime.now(timezone.utc).isoformat()})
+    if activo is not None:
+        fila["activo"] = bool(activo)
+    if cli is None:
+        m = _memoria("indices", {})
+        m[nombre] = {**m.get(nombre, {"activo": False, "tickers": [], "n": 0, "actualizado_en": None}), **fila}
+        return True
+    try:
+        cli.table("rastreador_indices").upsert(fila, on_conflict="nombre").execute()
+        return True
+    except Exception:
+        return False
+
+
+def abrir_pase(indice: str, n_total: int) -> int | None:
+    cli = _cliente()
+    if cli is None:
+        return None
+    try:
+        r = cli.table("rastreo_pases").insert({"indice": indice, "n_total": n_total}).execute()
+        return r.data[0]["id"] if r.data else None
+    except Exception:
+        return None
+
+
+def cerrar_pase(pase_id: int | None, estado: str, n_ok: int, n_error: int, detalle: dict | None = None) -> None:
+    cli = _cliente()
+    if cli is None or pase_id is None:
+        return
+    try:
+        cli.table("rastreo_pases").update({"fin": datetime.now(timezone.utc).isoformat(), "estado": estado,
+                                          "n_ok": n_ok, "n_error": n_error, "detalle": detalle}).eq("id", pase_id).execute()
+    except Exception:
+        pass
+
+
+def ultimos_pases(n: int = 5) -> list[dict]:
+    cli = _cliente()
+    if cli is None:
+        return []
+    try:
+        return cli.table("rastreo_pases").select("*").order("inicio", desc=True).limit(n).execute().data or []
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------- alertas --

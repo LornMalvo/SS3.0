@@ -1,7 +1,8 @@
 """Panel de métricas del Bloque 3, bajo el gráfico: FUNDAMENTALES (tamaño,
 valoración, rentabilidad, balance y caja) y TÉCNICOS. Las comparativas
-"vs media sector" leen las tablas de config_sectores y se etiquetan como
-referencia de sector; sin sector conocido no se muestra referencia alguna.
+"vs sector" usan core_referencias (comparables validados > sector real del
+rastreo nocturno > semilla de config_sectores) y etiquetan cuál; sin
+referencia no se muestra comparativa alguna.
 
 Cada valor lleva un semáforo (verde bueno / rojo malo / neutro) calculado en
 core_interpretar; bajo RSI, ADX y short interest se añade una frase que
@@ -12,15 +13,15 @@ from __future__ import annotations
 
 import streamlit as st
 
-import config_sectores as sec
 import core_interpretar as ci
+import core_referencias
 import ui_componentes as ui
 from core_ponderar import es_dato
 
 
-def _ref(tabla: dict, sector: str | None, fmt) -> tuple[str | None, float | None]:
-    v = tabla.get(sector) if sector else None
-    return (f"sector {fmt(v)}", v) if es_dato(v) else (None, None)
+def _ref(refs: dict | None, clave: str, fmt) -> tuple[str | None, float | None]:
+    v = core_referencias.valor(refs, clave)
+    return (core_referencias.etiqueta(refs, clave, fmt), v) if es_dato(v) else (None, None)
 
 
 def _ratio(v, decimales: int = 1) -> str:
@@ -39,18 +40,19 @@ def _titulo(texto: str) -> None:
     st.markdown(f'<div class="ss-etiqueta" style="margin-top:.6rem">{texto}</div>', unsafe_allow_html=True)
 
 
-def _vs_sector(etiqueta: str, valor, tabla: dict, sector: str | None, fmt_valor, fmt_ref,
+def _vs_sector(etiqueta: str, valor, clave: str, refs: dict | None, fmt_valor, fmt_ref,
                menor_mejor: bool, clave_abs: str | None = None) -> None:
-    """Fila con referencia sectorial y semáforo relativo; sin referencia,
-    semáforo absoluto si la métrica lo tiene definido."""
-    ref_txt, ref = _ref(tabla, sector, fmt_ref)
+    """Fila con referencia (comparables / sector real / semilla) y semáforo
+    relativo; sin referencia, semáforo absoluto si la métrica lo tiene."""
+    ref_txt, ref = _ref(refs, clave, fmt_ref)
     sem = ci.semaforo_relativo(valor, ref, menor_mejor) if ref is not None else ci.semaforo_absoluto(clave_abs or "", valor)
     ui.metrica(etiqueta, fmt_valor(valor), ref_txt, sem)
 
 
-def render(fund: dict, ind: dict, ind_extra: dict | None = None) -> None:
-    """`fund`: dict de core_fundamentales.extraer; `ind`: core_indicadores.resumen."""
-    sector = fund.get("sector")
+def render(fund: dict, ind: dict, referencias: dict | None = None) -> None:
+    """`fund`: dict de core_fundamentales.extraer; `ind`: core_indicadores.resumen;
+    `referencias`: core_referencias.construir (sin ellas, semilla)."""
+    refs = referencias or core_referencias.solo_semilla(fund.get("sector"), fund.get("industria"))
     divisa = fund.get("divisa")
     importe = lambda v: ui.fmt_importe(v, divisa)  # noqa: E731
     f1 = lambda v: ui.fmt_num(v, 1)  # noqa: E731
@@ -66,22 +68,21 @@ def render(fund: dict, ind: dict, ind_extra: dict | None = None) -> None:
         _subtitulo("Valoración")
         ui.metrica("PER (trailing)", _ratio(fund.get("per_trailing")),
                    semaforo=ci.semaforo_absoluto("per_trailing", fund.get("per_trailing")))
-        _vs_sector("PER forward", fund.get("per_forward"), sec.PER_FORWARD_SECTOR, sector, _ratio, f1, True)
-        _vs_sector("PEG", fund.get("peg"), sec.PEG_SECTOR, sector, lambda v: _ratio(v, 2), f2, True)
+        _vs_sector("PER forward", fund.get("per_forward"), "per_forward", refs, _ratio, f1, True)
+        _vs_sector("PEG", fund.get("peg"), "peg", refs, lambda v: _ratio(v, 2), f2, True)
         ui.metrica("Precio / Ventas", _ratio(fund.get("precio_ventas"), 2),
                    semaforo=ci.semaforo_absoluto("precio_ventas", fund.get("precio_ventas")))
-        ui.metrica("Precio / Valor contable", _ratio(fund.get("precio_valor_contable"), 2),
-                   semaforo=ci.semaforo_absoluto("precio_valor_contable", fund.get("precio_valor_contable")))
-        _vs_sector("EV / EBITDA", fund.get("ev_ebitda"), sec.EV_EBITDA_SECTOR, sector, _ratio, f1, True)
+        _vs_sector("Precio / Valor contable", fund.get("precio_valor_contable"), "precio_valor_contable", refs,
+                   lambda v: _ratio(v, 2), f2, True, "precio_valor_contable")
+        _vs_sector("EV / EBITDA", fund.get("ev_ebitda"), "ev_ebitda", refs, _ratio, f1, True)
 
         _subtitulo("Rentabilidad")
-        _vs_sector("Margen neto", fund.get("margen_neto"), sec.MARGEN_NETO_SECTOR, sector, _pct, _pct, False)
-        _vs_sector("Margen operativo", fund.get("margen_operativo"), sec.MARGEN_OPERATIVO_SECTOR, sector,
-                   _pct, _pct, False)
+        _vs_sector("Margen neto", fund.get("margen_neto"), "margen_neto", refs, _pct, _pct, False)
+        _vs_sector("Margen operativo", fund.get("margen_operativo"), "margen_operativo", refs, _pct, _pct, False)
         ui.metrica("Margen EBITDA", _pct(fund.get("margen_ebitda")),
                    semaforo=ci.semaforo_absoluto("margen_ebitda", fund.get("margen_ebitda")))
-        _vs_sector("ROE", fund.get("roe"), sec.ROE_SECTOR, sector, _pct, _pct, False)
-        _vs_sector("ROIC", fund.get("roic"), sec.ROIC_SECTOR, sector, _pct, _pct, False)
+        _vs_sector("ROE", fund.get("roe"), "roe", refs, _pct, _pct, False)
+        _vs_sector("ROIC", fund.get("roic"), "roic", refs, _pct, _pct, False)
         ui.metrica("ROA", _pct(fund.get("roa")), semaforo=ci.semaforo_absoluto("roa", fund.get("roa")))
 
         _subtitulo("Balance y caja")

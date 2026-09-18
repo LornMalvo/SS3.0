@@ -117,6 +117,8 @@ def _fair_value(fv: dict, divisa: str | None) -> None:
             if estado == "recortado":
                 texto += f" (recortado desde {ui.fmt_num(m['bruto'], 2)})"
             pe = f"efectivo {m['peso_efectivo'] * 100:.0f} %" if es_dato(m["peso_efectivo"]) else ""
+            if m.get("referencia"):
+                pe = f"{pe} · ref. {m['referencia']}".strip(" ·")
             ui.metrica(f"{m['etiqueta']} · peso {m['peso'] * 100:.0f} %", texto, pe)
 
 
@@ -124,5 +126,6 @@ def render(a: dict) -> None:
     with ui.tarjeta("Salud / Calidad Fundamental y Valor Objetivo"):
         _calidad(a["calidad"])
         _fair_value(a["fair_value"], a["fundamentales"].get("divisa_cotizacion"))
+        refs = a["fair_value"].get("referencias") or "sector (semilla)"
         ui.frescura(a["estados"].obtenido_en if a["estados"].ok else None,
-                    "yfinance (estados financieros) · referencias sectoriales semilla", "fundamentales")
+                    f"yfinance (estados financieros) · referencias: {refs}", "fundamentales")

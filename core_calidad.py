@@ -17,6 +17,7 @@ import math
 import pandas as pd
 
 import config_sectores as sec
+import core_referencias
 from config_settings import (
     CALIDAD_ANIOS_CRECIMIENTO,
     CALIDAD_BLOQUES,
@@ -50,12 +51,9 @@ ETIQUETAS = {
     "fcf_positivo": "Ejercicios con FCF positivo",
     "deuda_patrimonio": "Deuda / Equity",
 }
-REFERENCIAS_SECTOR = {
-    "roic": sec.ROIC_SECTOR,
-    "margen_bruto": sec.MARGEN_BRUTO_SECTOR,
-    "margen_operativo": sec.MARGEN_OPERATIVO_SECTOR,
-    "roe": sec.ROE_SECTOR,
-}
+# Referencias de las métricas relativas: desde la sesión 6 salen de
+# core_referencias (comparables validados > sector real > semilla); las
+# tablas de config_sectores solo se usan si no se pasan referencias.
 
 
 # ------------------------------------------------------ lectura de estados --
@@ -173,15 +171,16 @@ def perfil(fund: dict) -> str:
 
 
 # ------------------------------------------------------------- puntuación ----
-def _puntuar(clave: str, valor, sector: str | None) -> tuple[float | None, str | None]:
+def _puntuar(clave: str, valor, sector: str | None, refs: dict) -> tuple[float | None, str | None]:
     """(puntos, referencia legible)."""
     if not es_dato(valor):
         return None, None
     if clave in CALIDAD_METRICAS_RELATIVAS:
-        ref = REFERENCIAS_SECTOR[clave].get(sector) if sector else None
+        ref = core_referencias.valor(refs, clave)
         if not es_dato(ref) or ref <= 0:
             return None, None
-        return puntuar_tramos(valor / ref, CALIDAD_TRAMOS_RELATIVOS), f"sector {ref * 100:.0f} %"
+        return (puntuar_tramos(valor / ref, CALIDAD_TRAMOS_RELATIVOS),
+                core_referencias.etiqueta(refs, clave, lambda v: f"{v * 100:.0f} %"))
     tramos = CALIDAD_TRAMOS[clave]
     if sector in sec.SECTORES_APALANCADOS and clave in CALIDAD_TRAMOS_APALANCADOS:
         tramos = CALIDAD_TRAMOS_APALANCADOS[clave]
@@ -189,15 +188,18 @@ def _puntuar(clave: str, valor, sector: str | None) -> tuple[float | None, str |
     return puntuar_tramos(valor, tramos), None
 
 
-def calcular(fund: dict, estados: dict | None) -> dict:
+def calcular(fund: dict, estados: dict | None, referencias: dict | None = None) -> dict:
+    """`referencias`: core_referencias.construir (comparables > sector real
+    > semilla). Sin ellas se usa la semilla del sector."""
     sector = fund.get("sector")
+    refs = referencias or core_referencias.solo_semilla(sector, fund.get("industria"))
     valores, motivos = metricas(fund, estados)
     bloques = {}
     for nombre, pesos in CALIDAD_BLOQUES.items():
         detalle = {}
         componentes = {}
         for clave, peso in pesos.items():
-            puntos, referencia = _puntuar(clave, valores.get(clave), sector)
+            puntos, referencia = _puntuar(clave, valores.get(clave), sector, refs)
             if puntos is None and clave not in motivos:
                 motivos[clave] = ("sin referencia sectorial" if clave in CALIDAD_METRICAS_RELATIVAS and es_dato(valores.get(clave))
                                   else "sin dato")
@@ -217,5 +219,6 @@ def calcular(fund: dict, estados: dict | None) -> dict:
         "perfil": perfil(fund),
         "bloques": bloques,
         "excluidas": {k: v for k, v in motivos.items()},
+        "referencias": refs.get("dominante"),
         "version": MOTOR_VERSION,
     }

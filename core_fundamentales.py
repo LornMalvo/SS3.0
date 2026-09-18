@@ -60,6 +60,22 @@ def roic(estados: dict | None) -> float | None:
     return acotar(ebit * (1 - tipo) / invertido, -1.0, 2.0)
 
 
+def ffo_por_accion(estados: dict | None, acciones: float | None) -> float | None:
+    """FFO (funds from operations) por acción, la magnitud económica de un
+    REIT: beneficio neto + depreciación y amortización del último ejercicio,
+    entre las acciones en circulación. None si falta cualquier pieza."""
+    if not estados or not es_dato(acciones) or acciones <= 0:
+        return None
+    res, fc = estados.get("resultados"), estados.get("flujo_caja")
+    beneficio = _fila(res, "Net Income", "Net Income Common Stockholders")
+    dya = _fila(fc, "Depreciation And Amortization", "Depreciation Amortization Depletion") \
+        or _fila(res, "Reconciled Depreciation")
+    if beneficio is None or dya is None:
+        return None
+    ffo = beneficio + abs(dya)
+    return ffo / acciones if ffo > 0 else None
+
+
 def ingresos_ultimo_trimestre(estados: dict | None) -> tuple[float | None, str | None]:
     """(ingresos, etiqueta del trimestre) del último trimestre publicado."""
     if not estados:
@@ -76,6 +92,9 @@ def ingresos_ultimo_trimestre(estados: dict | None) -> tuple[float | None, str |
 def extraer(info: dict | None, estados: dict | None = None) -> dict:
     info = info or {}
     d2e = _num(info.get("debtToEquity"))
+    acciones = _num(info.get("sharesOutstanding"))
+    ffo_acc = ffo_por_accion(estados, acciones)
+    precio = _num(info.get("currentPrice")) or _num(info.get("regularMarketPrice"))
     return {
         "divisa": info.get("financialCurrency") or info.get("currency"),
         "sector": info.get("sector"),
@@ -89,6 +108,9 @@ def extraer(info: dict | None, estados: dict | None = None) -> dict:
         "peg": _num(info.get("trailingPegRatio")) if es_dato(info.get("trailingPegRatio")) else _num(info.get("pegRatio")),
         "precio_ventas": _num(info.get("priceToSalesTrailing12Months")),
         "precio_valor_contable": _num(info.get("priceToBook")),
+        "valor_contable_accion": _num(info.get("bookValue")),     # book value POR ACCIÓN en yfinance
+        "ffo_por_accion": ffo_acc,                                # REITs: BN + D&A por acción
+        "p_ffo": (precio / ffo_acc) if es_dato(precio) and es_dato(ffo_acc) and ffo_acc > 0 else None,
         "ev_ebitda": _num(info.get("enterpriseToEbitda")),
         "ev_ventas": _num(info.get("enterpriseToRevenue")),
         "valor_empresa": _num(info.get("enterpriseValue")),

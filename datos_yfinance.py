@@ -34,6 +34,7 @@ from config_settings import (
     TTL_LOTE,
     TTL_NOTICIAS,
     TTL_PRECIO,
+    TTL_RECOMENDACIONES,
 )
 from core_ponderar import es_dato
 
@@ -408,7 +409,37 @@ def obtener_earnings_yf(ticker: str) -> Dato:
     if futuros:
         fecha, est = min(futuros)
         rev = cal.get("Revenue Average")
-        proximo = {"fecha": fecha, "eps_est": est, "rev_est": float(rev) if es_dato(rev) else None, "hora": None}
+        # Yahoo distingue fecha confirmada (una) de rango estimado (dos
+        # fechas en `calendar`): se guarda para decir "prevista" en pantalla.
+        fechas_cal = cal.get("Earnings Date") or []
+        estimada = len(fechas_cal) > 1
+        proximo = {"fecha": fecha, "eps_est": est, "rev_est": float(rev) if es_dato(rev) else None, "hora": None,
+                   "estimada": estimada}
     if not pasados and proximo is None:
         return Dato(None, "yfinance", _ahora())
     return Dato({"pasados": pasados[:4], "proximo": proximo}, "yfinance", _ahora())
+
+
+@st.cache_data(ttl=TTL_RECOMENDACIONES, show_spinner=False)
+def obtener_recomendaciones_yf(ticker: str) -> Dato:
+    """Serie mensual de recomendaciones (`Ticker.recommendations`: periodos
+    0m, -1m, -2m, -3m) en el formato de datos_finnhub: [{periodo, strongBuy,
+    buy, hold, sell, strongSell}], más reciente primero. El periodo se
+    expresa como primer día del mes correspondiente."""
+    try:
+        df = yf.Ticker(ticker).recommendations
+    except Exception:
+        return Dato(None, "yfinance", _ahora())
+    if df is None or df.empty or "period" not in df.columns:
+        return Dato(None, "yfinance", _ahora())
+    hoy = pd.Timestamp.now().normalize()
+    serie = []
+    for _, fila in df.iterrows():
+        try:
+            meses = int(str(fila["period"]).replace("m", ""))          # "0m", "-1m"...
+        except ValueError:
+            continue
+        periodo = (hoy + pd.DateOffset(months=meses)).replace(day=1).date().isoformat()
+        serie.append({"periodo": periodo, **{k: int(fila.get(k) or 0) for k in ("strongBuy", "buy", "hold", "sell", "strongSell")}})
+    serie.sort(key=lambda x: x["periodo"], reverse=True)
+    return Dato(serie or None, "yfinance", _ahora())

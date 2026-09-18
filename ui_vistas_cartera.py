@@ -359,10 +359,8 @@ def render() -> None:
         return
 
     if abiertas:
-        columnas = st.columns(3)
-        for i, t in enumerate(sorted(abiertas, key=lambda x: -(posiciones[x].get("valor_eur") or 0))):
-            with columnas[i % 3]:
-                _ficha(posiciones[t])
+        ui.rejilla(sorted(abiertas, key=lambda x: -(posiciones[x].get("valor_eur") or 0)),
+                   lambda t: _ficha(posiciones[t]))
 
     # Rendimiento y riesgo se muestran por defecto (decisión de Samuel,
     # sesión 5); el libro sigue plegado porque es largo.

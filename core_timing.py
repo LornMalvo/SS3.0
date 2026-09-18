@@ -36,6 +36,7 @@ ETIQUETAS = {
     "variacion_1a": "Variación 1 año", "upside": "Upside (fair value)", "peg": "PEG",
     "salud_fundamental": "Calidad fundamental", "proximidad_earnings": "Proximidad a earnings",
     "confluencia_dca": "Cercanía a la zona de entrada", "volumen_relativo": "Volumen relativo",
+    "revisiones_analistas": "Revisiones de analistas",
 }
 
 
@@ -59,7 +60,8 @@ def _dias_hasta(fecha) -> float | None:
 
 
 def valores(df, ind: dict, fund: dict, calidad: dict | None, fair_value: dict | None,
-            earnings: dict | None, plan: dict | None) -> tuple[dict[str, float | None], dict[str, str]]:
+            earnings: dict | None, plan: dict | None,
+            analistas: dict | None = None) -> tuple[dict[str, float | None], dict[str, str]]:
     """Valor crudo de cada componente (en la unidad que espera su tramo) y
     motivo cuando falta."""
     m: dict[str, float | None] = {}
@@ -107,6 +109,12 @@ def valores(df, ind: dict, fund: dict, calidad: dict | None, fair_value: dict | 
     m["volumen_relativo"] = ind.get("volumen_relativo")
     if m["volumen_relativo"] is None:
         motivos["volumen_relativo"] = "histórico insuficiente"
+    # Revisiones de recomendación (core_analistas.resumen): solo la variación
+    # del índice a 3 meses; sin serie o con pocos analistas queda fuera y
+    # ponderar() reparte sus 3 puntos.
+    m["revisiones_analistas"] = (analistas or {}).get("revision")
+    if m["revisiones_analistas"] is None:
+        motivos["revisiones_analistas"] = (analistas or {}).get("revision_motivo") or "sin recomendaciones de analistas"
     return m, motivos
 
 
@@ -125,8 +133,8 @@ def _puntos(clave: str, valor, df) -> float | None:
 
 
 def calcular(df, ind: dict, fund: dict, calidad: dict | None, fair_value: dict | None,
-             earnings: dict | None, plan: dict | None) -> dict:
-    crudos, motivos = valores(df, ind, fund, calidad, fair_value, earnings, plan)
+             earnings: dict | None, plan: dict | None, analistas: dict | None = None) -> dict:
+    crudos, motivos = valores(df, ind, fund, calidad, fair_value, earnings, plan, analistas)
     componentes, detalle = {}, {}
     for clave, peso in TIMING_PESOS.items():
         pts = _puntos(clave, crudos.get(clave), df)

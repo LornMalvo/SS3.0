@@ -11,7 +11,8 @@ APP_CLAIM = "Tu análisis del mercado"
 # Se guarda junto a cada análisis persistido. Si cambia un peso o un umbral
 # de cualquier motor, se sube la versión: así el backtesting sabe qué
 # parámetros produjeron cada señal pasada y puede reconstruirla.
-MOTOR_VERSION = "0.2.1"   # 0.2.1: el veredicto REDUCIR se activa con posición abierta (cartera o paper)
+MOTOR_VERSION = "0.3.0"   # 0.3.0: revisiones de analistas en Timing (pesos retocados), referencias por
+#                            comparables reales, P/B financieras, P/FFO REITs, consenso desde 2 analistas
 
 # ---------------------------------------------------------------- paleta ----
 C_PRIMARIO = "#004e64"
@@ -187,7 +188,42 @@ FV_PER_HISTORICO_INESTABILIDAD_MAX = 2.0
 FV_PEG_OBJETIVO = 1.0
 FV_PEG_CRECIMIENTO_MIN = 0.08   # por debajo, el PEG es un error de categoría: se excluye
 FV_PEG_CRECIMIENTO_MAX = 0.30   # techo: no extrapolar crecimientos explosivos
-FV_CONSENSO_MIN_ANALISTAS = 4
+# Mínimo de analistas para que el precio objetivo entre como método. Bajado
+# de 4 a 2 (decisión de Samuel, sesión 6): en small caps y valores europeos
+# la cobertura es corta y el método quedaba excluido casi siempre. El peso
+# sigue siendo FIJO, así que un consenso corto no gana influencia por serlo.
+FV_CONSENSO_MIN_ANALISTAS = 2
+# Referencias sectoriales por comparables reales (sesión 6). Orden de
+# preferencia de cada múltiplo/margen de referencia:
+#   1. mediana de los COMPARABLES validados del ticker (tabla `comparables`
+#      + múltiplos guardados en `multiplos`), si hay al menos este número
+#   2. mediana REAL del sector calculada por el rastreo nocturno sobre todo
+#      el universo analizado (`sector_referencias`), si hay al menos N
+#   3. tabla semilla de config_sectores (orden de magnitud)
+# Cada motor enseña qué referencia ha usado.
+REFERENCIA_PEERS_MIN = 3
+REFERENCIA_SECTOR_MIN = 8
+MULTIPLOS_MAX_DIAS = 7           # múltiplos guardados más antiguos se vuelven a pedir al abrir el bloque
+PEERS_MAX = 8                    # comparables que se muestran/cargan como máximo (coste: 1 info por peer)
+PEERS_SUGERIDOS_MAX = 6          # sugerencias de Finnhub que se siembran al ver un ticker por primera vez
+# Financieras: la deuda ES el negocio, así que EV/EBITDA no es magnitud
+# válida y el múltiplo natural es Precio / Valor contable (P/B x valor
+# contable por acción). REITs: el BPA GAAP se lo come la amortización del
+# inmueble; el múltiplo natural es Precio / FFO (FFO = beneficio neto +
+# amortización, por acción).
+FV_PESOS_FINANCIERA = {
+    "per_historico": 0.15,
+    "per_forward": 0.20,
+    "peg": 0.10,
+    "pb": 0.35,
+    "consenso": 0.20,
+}
+FV_PESOS_REIT = {
+    "p_ffo": 0.40,
+    "ev_ebitda": 0.25,
+    "consenso": 0.35,
+}
+REIT_P_FFO_REFERENCIA = 15.0     # semilla: P/FFO mediano histórico del sector REIT (13-18)
 
 # Banda de cordura sobre un ancla MIXTA (mediana de métodos propios + consenso).
 # Asimétrica: el sell-side publica objetivos por encima del precio de forma
@@ -231,25 +267,32 @@ BANDAS_VALORACION = [
 # lectura contada dos veces, y cualquier error del FV entraba por duplicado.
 TIMING_PESOS = {
     # Momentum y flujo (27)
+    # Momentum y flujo (26)
     "rsi": 9,
     "macd": 8,
-    "obv": 5,
+    "obv": 4,
     "adx": 5,
-    # Estructura de precio (23)
+    # Estructura de precio (21)
     "mm50": 5,
     "mm100": 4,
     "mm200": 6,
-    "ath_atl": 4,
-    "variacion_1a": 4,
+    "ath_atl": 3,
+    "variacion_1a": 3,
     # Valoración (20)
     "upside": 14,
     "peg": 6,
     # Calidad (12)
     "salud_fundamental": 12,
-    # Contexto (18)
+    # Contexto (21)
     "proximidad_earnings": 5,
     "confluencia_dca": 8,
     "volumen_relativo": 5,
+    # Revisiones de recomendación de analistas (sesión 6): entra la VARIACIÓN
+    # de la distribución (hacia compra / hacia venta), nunca el nivel, que
+    # está sesgado al alza de forma sistemática. Peso pequeño (3) porque el
+    # sell-side ya toca el veredicto vía precio objetivo (Fair Value) y
+    # upside (Timing); los 3 puntos salen de obv, ath_atl y variacion_1a.
+    "revisiones_analistas": 3,
 }
 assert sum(TIMING_PESOS.values()) == 100
 
@@ -307,14 +350,33 @@ TIMING_TRAMOS = {
     "proximidad_earnings": [(0, 15), (10, 20), (20, 55), (30, 75), (60, 90), (120, 90)],
     "confluencia_dca": [(0, 100), (1, 85), (2, 65), (4, 40), (8, 15)],
     "volumen_relativo": [(0.5, 40), (1.0, 55), (1.5, 75), (2.5, 90)],
+    # Revisión neta a 3 meses (core_analistas.revision): variación del índice
+    # de recomendación (-2 venta fuerte ... +2 compra fuerte, media por
+    # analista). +0,5 = un tercio de la cobertura subió un escalón entero.
+    "revisiones_analistas": [(-0.6, 10), (-0.2, 35), (0.0, 50), (0.2, 70), (0.6, 100)],
 }
 TIMING_FAMILIAS = {
     "Momentum y flujo": ("rsi", "macd", "obv", "adx"),
     "Estructura de precio": ("mm50", "mm100", "mm200", "ath_atl", "variacion_1a"),
     "Valoración": ("upside", "peg"),
     "Calidad": ("salud_fundamental",),
-    "Contexto": ("proximidad_earnings", "confluencia_dca", "volumen_relativo"),
+    "Contexto": ("proximidad_earnings", "confluencia_dca", "volumen_relativo", "revisiones_analistas"),
 }
+# Recomendaciones de analistas (Finnhub /stock/recommendation, respaldo
+# yfinance): serie mensual de la distribución. Con menos analistas que este
+# mínimo la revisión no se puntúa (un cambio de 1 sobre 2 no es tendencia).
+ANALISTAS_MIN_REVISION = 3
+ANALISTAS_MESES_REVISION = 3
+ANALISTAS_MESES_SERIE = 6        # meses de serie que se guardan/enseñan
+ANALISTAS_CONSENSO = [   # (índice mínimo, etiqueta, color) sobre el índice -2..+2
+    (1.5, "Compra fuerte", C_VERDE_OSCURO),
+    (0.5, "Compra", C_VERDE),
+    (-0.5, "Mantener", C_AMBAR),
+    (-1.5, "Venta", C_NARANJA),
+    (-2.1, "Venta fuerte", C_ROJO),
+]
+ANALISTAS_COLORES = {"strongBuy": C_VERDE_OSCURO, "buy": C_VERDE, "hold": C_AMBAR, "sell": C_NARANJA, "strongSell": C_ROJO}
+ANALISTAS_ETIQUETAS = {"strongBuy": "Compra fuerte", "buy": "Compra", "hold": "Mantener", "sell": "Venta", "strongSell": "Venta fuerte"}
 TIMING_OBV_SESIONES = 20
 TIMING_VOLUMEN_DISTRIBUCION = 25   # puntos si el volumen sube con precio cayendo (distribución)
 
@@ -563,6 +625,34 @@ VEREDICTO_ORDEN = ("COMPRAR", "ACUMULAR POR TRAMOS", "VIGILAR", "NO COMPRAR", "R
 RASTREADOR_HORIZONTES = {"3m": 91, "6m": 182, "12m": 365}
 RASTREADOR_EVALUACION_MIN_DIAS = 5   # un análisis de hace menos días no se evalúa (ruido)
 
+# --------------------------------------------- rastreo nocturno (cron) ----
+# Índices enteros no caben en una petición interactiva (500 tickers son
+# ~2.500 peticiones a Yahoo). Se rastrean en GitHub Actions por la noche
+# (tarea_rastreo.py, .github/workflows/rastreo.yml) escribiendo cada
+# análisis en `analisis_historico` con origen 'cron'; la vista Rastreador
+# tiene un modo Screener que filtra sobre lo persistido: coste en API cero.
+# Constituyentes: tablas de Wikipedia (datos_indices.py), refrescadas cada
+# INDICES_REFRESCO_DIAS y guardadas en `rastreador_indices`.
+# Cada índice lleva varias páginas candidatas (la primera que tenga una
+# tabla de constituyentes con columna de ticker gana): la Wikipedia inglesa
+# quitó las tablas del Nasdaq-100 y del Dow, la alemana y la española las
+# mantienen. Se comprobó el 2026-09-18.
+INDICES = {   # nombre visible -> (páginas candidatas, sufijo de Yahoo si el ticker no lo trae)
+    "S&P 500": (("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",), ""),
+    "Nasdaq 100": (("https://de.wikipedia.org/wiki/NASDAQ-100", "https://en.wikipedia.org/wiki/Nasdaq-100"), ""),
+    "Dow Jones": (("https://es.wikipedia.org/wiki/Dow_Jones_Industrial_Average",
+                   "https://en.wikipedia.org/wiki/Dow_Jones_Industrial_Average"), ""),
+    "IBEX 35": (("https://en.wikipedia.org/wiki/IBEX_35",), ".MC"),
+    "Euro Stoxx 50": (("https://en.wikipedia.org/wiki/EURO_STOXX_50",), ""),
+}
+INDICES_MIN_CONSTITUYENTES = 20   # una "tabla de constituyentes" con menos filas es otra cosa
+INDICES_REFRESCO_DIAS = 7
+RASTREO_CRON_PAUSA_SEG = 1.2       # entre tickers: sin prisa, nadie espera
+RASTREO_CRON_PAUSA_429_SEG = 90    # tras un límite de Yahoo: parar y seguir
+RASTREO_CRON_MAX_ERRORES_SEGUIDOS = 15   # con tantos fallos seguidos, Yahoo nos ha cortado: abortar el pase
+SCREENER_MAX_DIAS = 10             # el screener enseña el último análisis de cada ticker si no es más viejo que esto
+SCREENER_MAX_FILAS = 5000
+
 # ================================================================= ALERTAS ====
 # Reglas del cron (tarea_alertas.py, GitHub Actions cada hora en sesión).
 # Cada alerta lleva una clave de deduplicación en `alertas_enviadas`: las de
@@ -585,6 +675,8 @@ TTL_INFO = 3600
 TTL_ESTADOS_FINANCIEROS = 172800   # solo cambian 4 veces al año
 TTL_NOTICIAS = 900
 TTL_EARNINGS = 21600          # calendario de resultados: cambia con cada publicación
+TTL_RECOMENDACIONES = 43200   # serie mensual de recomendaciones: cambia despacio
+TTL_PEERS = 172800            # sugerencias de comparables: casi estáticas
 TTL_TRADUCCION = 172800       # la descripción de una empresa apenas cambia
 TTL_ESTADOS_FINANCIEROS_L1 = TTL_ESTADOS_FINANCIEROS
 TTL_FX = 600

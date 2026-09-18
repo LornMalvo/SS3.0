@@ -12,8 +12,19 @@ traducción. Por eso hay tope (RASTREADOR_MAX_TICKERS) y el rastreo se lanza
 a mano, nunca al abrir la vista. El resultado vive en session_state:
 cambiar filtros u orden no vuelve a pedir nada.
 
+Dos modos (sesión 6):
+- EN VIVO: el de siempre (universo pequeño, bajo demanda, con tope).
+- SCREENER: índices enteros rastreados de noche por el cron
+  (tarea_rastreo.py) y persistidos en `analisis_historico` con origen
+  'cron'. La vista solo CONSULTA: filtros sobre calidad, upside, banda,
+  timing, señal, veredicto y sector; coste en API cero y respuesta
+  instantánea. Los índices se activan desde aquí (`rastreador_indices`).
+  Para comparar lado a lado se relanzan en vivo hasta 3 seleccionados.
+
 Distribución:
-  [ Universo: fuentes · añadir/quitar · botón Rastrear ]
+  [ Modo: En vivo | Screener ]
+  [ Universo: fuentes · añadir/quitar · botón Rastrear ]      (en vivo)
+  [ Rastreo nocturno: índices activos · último pase ]         (screener)
   [ Resultados: filtros · orden · tabla con selección de filas ]
   [ Comparación lado a lado de las filas seleccionadas (2-3) ]
   [ toggle Evaluación de señales: retornos por veredicto y por señal ]
@@ -32,12 +43,16 @@ import db_supabase
 import ui_componentes as ui
 import ui_interfaz
 from config_settings import (
+    BANDAS_VALORACION,
     BENCHMARK,
     C_NARANJA,
     C_TEXTO_TENUE,
+    INDICES,
     PAPER_ESTADOS_ACTIVOS,
     RASTREADOR_HORIZONTES,
     RASTREADOR_MAX_TICKERS,
+    SCREENER_MAX_DIAS,
+    SENIALES_TIMING,
     TEXTO_ND,
     VEREDICTO_ORDEN,
 )
@@ -46,7 +61,9 @@ from datos_cache import cubo_mercado
 from datos_yfinance import obtener_cierres_lote
 
 CLAVE_RASTREO = "rastreo"
+CLAVE_SCREENER = "screener"
 FUENTES = ("Favoritos", "Cartera", "Paper Trading", "Universo propio")
+MODOS = ("En vivo", "Screener (rastreo nocturno)")
 
 
 def _sem(v) -> str | None:
@@ -105,16 +122,16 @@ def _universo() -> list[str]:
     return tickers
 
 
-def _rastrear(tickers: list[str]) -> None:
+def _rastrear(tickers: list[str], clave: str = CLAVE_RASTREO) -> None:
     """Analiza en serie (Yahoo penaliza la concurrencia por IP) y guarda
-    solo las filas comprimidas. Cada análisis se persiste en el histórico,
-    así el rastreo alimenta la evaluación de señales."""
+    solo las filas comprimidas. Cada análisis se persiste en el histórico
+    (origen 'rastreador'), así el rastreo alimenta la evaluación de señales."""
     filas, errores = [], []
     barra = st.progress(0.0, text="Rastreando…")
     for i, t in enumerate(tickers, start=1):
         barra.progress(i / len(tickers), text=f"Analizando {t} ({i}/{len(tickers)})")
         try:
-            a = datos_analisis.analizar(t, ligero=True)
+            a = datos_analisis.analizar(t, ligero=True, origen="rastreador")
         except Exception:
             a = None
         if a is None:
@@ -122,25 +139,30 @@ def _rastrear(tickers: list[str]) -> None:
             continue
         filas.append(core_rastreador.fila(a))
     barra.empty()
-    st.session_state[CLAVE_RASTREO] = {"filas": filas, "errores": errores, "cuando": pd.Timestamp.now(),
-                                       "n": len(tickers)}
+    st.session_state[clave] = {"filas": filas, "errores": errores, "cuando": pd.Timestamp.now(), "n": len(tickers)}
 
 
 # --------------------------------------------------------------- resultados --
 def _tabla(filas: list[dict]) -> list[str]:
     """Tabla con selección de filas (hasta 3 para comparar). Devuelve los
     tickers seleccionados."""
+    screener = any("fecha" in f for f in filas)
     df = pd.DataFrame([{
         "Ticker": f["ticker"], "Nombre": f["nombre"], "Veredicto": f["veredicto"] or TEXTO_ND,
-        "Puntuación": f["puntuacion"], "Calidad": f["calidad"], "Timing": f["timing"], "Señal": f["senal"],
-        "Precio": f["precio"], "Fair value": f["fair_value"], "Upside %": f["upside_pct"],
-        "E1": f["e1"], "Dist. E1 %": f["dist_e1_pct"], "B/R": f["ratio_br"], "Sector": f["sector"] or "",
-        "Divisa": f["divisa"] or "",
+        "Puntuación": f["puntuacion"], "Calidad": f["calidad"], "Timing": f["timing"],
+        **({"Timing bruto": f.get("timing_bruto")} if screener else {}),
+        "Señal": f["senal"], "Precio": f["precio"], "Fair value": f["fair_value"], "Upside %": f["upside_pct"],
+        **({"Banda": (f.get("banda") or "").split(" — ")[0]} if screener else {}),
+        "E1": f["e1"], "Dist. E1 %": f["dist_e1_pct"],
+        **({} if screener else {"B/R": f["ratio_br"]}),
+        "Sector": f["sector"] or "", "Divisa": f["divisa"] or "",
+        **({"Fecha": f.get("fecha")} if screener else {}),
     } for f in filas])
     cfg = {
         "Puntuación": st.column_config.ProgressColumn(format="%.0f", min_value=0, max_value=100),
         "Calidad": st.column_config.ProgressColumn(format="%.0f", min_value=0, max_value=100),
         "Timing": st.column_config.ProgressColumn(format="%.0f", min_value=0, max_value=100),
+        "Timing bruto": st.column_config.NumberColumn(format="%.0f", help="Nota de timing SIN el gate de calidad (modo trading)"),
         "Precio": st.column_config.NumberColumn(format="%.2f"),
         "Fair value": st.column_config.NumberColumn(format="%.2f"),
         "Upside %": st.column_config.NumberColumn(format="%+.1f"),
@@ -154,36 +176,70 @@ def _tabla(filas: list[dict]) -> list[str]:
     return seleccion[:3]
 
 
-def _resultados(r: dict) -> list[dict]:
+def _resultados(r: dict, screener: bool = False) -> list[dict]:
     filas = r["filas"]
-    with ui.tarjeta("Resultados del rastreo"):
-        st.markdown(f'<div class="ss-anotacion">{len(filas)} de {r["n"]} valores analizados el '
-                    f'{r["cuando"]:%d/%m/%Y %H:%M}'
-                    + (f' · sin datos: {", ".join(r["errores"])}' if r["errores"] else "") + "</div>",
-                    unsafe_allow_html=True)
+    with ui.tarjeta("Resultados del screener (rastreo nocturno)" if screener else "Resultados del rastreo"):
+        if screener:
+            st.markdown(f'<div class="ss-anotacion">{len(filas)} valores con análisis de los últimos {SCREENER_MAX_DIAS} días '
+                        f'(último análisis de cada ticker rastreado por el cron; coste en API: cero).</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(f'<div class="ss-anotacion">{len(filas)} de {r["n"]} valores analizados el '
+                        f'{r["cuando"]:%d/%m/%Y %H:%M}'
+                        + (f' · sin datos: {", ".join(r["errores"])}' if r["errores"] else "") + "</div>",
+                        unsafe_allow_html=True)
+        k = "scr_" if screener else "rastreo_"
         c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1.4, 1.2])
-        cal_min = c1.slider("Calidad mínima", 0, 100, 0, 5, key="rastreo_cal")
-        up_min = c2.slider("Upside mínimo (%)", -50, 100, -50, 5, key="rastreo_up")
-        tim_min = c3.slider("Timing mínimo", 0, 100, 0, 5, key="rastreo_tim")
-        vers = c4.multiselect("Veredicto", list(VEREDICTO_ORDEN), default=[], key="rastreo_ver",
+        cal_min = c1.slider("Calidad mínima", 0, 100, 0, 5, key=f"{k}cal")
+        up_min = c2.slider("Upside mínimo (%)", -50, 100, -50, 5, key=f"{k}up")
+        tim_min = c3.slider("Timing mínimo", 0, 100, 0, 5, key=f"{k}tim")
+        vers = c4.multiselect("Veredicto", list(VEREDICTO_ORDEN), default=[], key=f"{k}ver",
                               placeholder="Todos los veredictos")
-        criterio = c5.selectbox("Orden", list(core_rastreador.CRITERIOS_ORDEN), key="rastreo_orden")
-        visibles = core_rastreador.ordenar(core_rastreador.filtrar(filas, cal_min, up_min, tim_min, vers or None), criterio)
+        criterio = c5.selectbox("Orden", list(core_rastreador.CRITERIOS_ORDEN), key=f"{k}orden")
+        senales = sectores = bandas = None
+        bruto = False
+        if screener:
+            c6, c7, c8, c9 = st.columns([1.2, 1.4, 1.6, 1.2])
+            senales = c6.multiselect("Señal de timing", [x[1] for x in SENIALES_TIMING], default=[], key="scr_sen",
+                                     placeholder="Todas las señales") or None
+            bandas = c7.multiselect("Banda de valoración", [b[2].split(" — ")[0] for b in BANDAS_VALORACION], default=[],
+                                    key="scr_banda", placeholder="Todas las bandas") or None
+            sectores = c8.multiselect("Sector", sorted({f["sector"] for f in filas if f.get("sector")}), default=[],
+                                      key="scr_sector", placeholder="Todos los sectores") or None
+            # Modo trading, decisión consciente: el motor topa el timing en 59
+            # si la calidad no llega a 60; aquí se puede filtrar por la nota
+            # bruta, y la tabla lo enseña en su propia columna.
+            bruto = c9.toggle("Timing sin gate de calidad", key="scr_bruto",
+                              help="Filtra por la nota bruta de timing, sin el tope por calidad < 60 (modo trading).")
+        visibles = core_rastreador.ordenar(
+            core_rastreador.filtrar(filas, cal_min, up_min, tim_min, vers or None, senales=senales, sectores=sectores,
+                                    bandas=bandas, timing_bruto=bruto), criterio)
         if not visibles:
             ui.nd("Ningún valor pasa los filtros.")
             return []
         seleccion = _tabla(visibles)
-        st.markdown('<div class="ss-anotacion">Marca 2 o 3 filas para compararlas lado a lado. Puntuación = calidad 40 % · '
-                    'timing 35 % · upside 25 %; el veredicto manda en el orden por defecto.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="ss-anotacion">Marca 2 o 3 filas para compararlas lado a lado'
+                    + (' (se analizan en vivo al pulsar el botón)' if screener else '')
+                    + '. Puntuación = calidad 40 % · timing 35 % · upside 25 %; el veredicto manda en el orden por defecto.</div>',
+                    unsafe_allow_html=True)
         c6, c7 = st.columns([3, 1])
         abrir = c6.selectbox("Abrir en Análisis Individual", [f["ticker"] for f in visibles], index=None,
-                             placeholder="Elige un ticker para abrir su análisis completo", key="rastreo_abrir",
+                             placeholder="Elige un ticker para abrir su análisis completo", key=f"{k}abrir",
                              label_visibility="collapsed")
-        if c7.button("Analizar", key="rastreo_abrir_btn", width="stretch", type="primary", disabled=abrir is None):
+        if c7.button("Analizar", key=f"{k}abrir_btn", width="stretch", type="primary", disabled=abrir is None):
             st.session_state["ticker_pendiente"] = abrir
             ui_interfaz.ir_a("Análisis Individual")
             st.rerun()
-        return [f for f in visibles if f["ticker"] in seleccion]
+        seleccionadas = [f for f in visibles if f["ticker"] in seleccion]
+        if screener and len(seleccionadas) >= 2:
+            if st.button(f"Comparar en vivo {', '.join(f['ticker'] for f in seleccionadas)}", key="scr_comparar",
+                         icon=":material/compare:", width="stretch"):
+                _rastrear([f["ticker"] for f in seleccionadas], clave=CLAVE_RASTREO + "_scr")
+                st.rerun()
+            vivo = st.session_state.get(CLAVE_RASTREO + "_scr")
+            if vivo and {f["ticker"] for f in vivo["filas"]} == {f["ticker"] for f in seleccionadas}:
+                return vivo["filas"]
+            return []
+        return seleccionadas
 
 
 # ------------------------------------------------------------- comparación --
@@ -310,22 +366,77 @@ def _evaluacion() -> None:
         ui.frescura(lote.obtenido_en, lote.fuente, "precio")
 
 
+# ---------------------------------------------------------- rastreo nocturno --
+def _nocturno() -> None:
+    """Qué índices rastrea el cron cada noche y cómo fue el último pase."""
+    with ui.tarjeta("Rastreo nocturno de índices"):
+        indices = {f["nombre"]: f for f in db_supabase.listar_indices()}
+        if not db_supabase.disponible():
+            ui.nd("Sin Supabase no hay rastreo nocturno: el cron escribe y esta vista lee de la base de datos.")
+            return
+        cols = st.columns(len(INDICES))
+        for col, nombre in zip(cols, INDICES):
+            fila = indices.get(nombre) or {"activo": False, "n": 0, "actualizado_en": None}
+            with col:
+                activo = st.toggle(nombre, value=bool(fila.get("activo")), key=f"idx_{nombre}",
+                                   help=f"{fila.get('n') or 0} constituyentes"
+                                        + (f" · lista del {str(fila.get('actualizado_en'))[:10]}" if fila.get("actualizado_en") else " · lista pendiente (la refresca el cron)"))
+                if activo != bool(fila.get("activo")):
+                    db_supabase.guardar_indice(nombre, activo=activo)
+                    st.rerun()
+        pases = db_supabase.ultimos_pases(3)
+        if pases:
+            txt = " · ".join(f'{p["indice"]}: {p["n_ok"]}/{p["n_total"]} ok, {p["estado"]} ({str(p["inicio"])[:16].replace("T", " ")} UTC)'
+                             for p in pases)
+            st.markdown(f'<div class="ss-anotacion">Últimos pases: {txt}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="ss-anotacion">Sin pases todavía. El cron (rastreo.yml, L-V 22:30 UTC) rastrea los índices '
+                        'activos; también se puede lanzar a mano desde GitHub Actions (Run workflow).</div>', unsafe_allow_html=True)
+
+
+def _cargar_screener() -> dict:
+    """Último análisis del cron de cada ticker (una consulta, cacheada por
+    cubo de mercado en session_state)."""
+    cubo = cubo_mercado()
+    clave = f"{CLAVE_SCREENER}_{cubo}"
+    if clave not in st.session_state or st.session_state.pop("screener_recargar", False):
+        desde = (pd.Timestamp.today() - timedelta(days=SCREENER_MAX_DIAS)).date().isoformat()
+        filas = [core_rastreador.fila_desde_historico(h) for h in db_supabase.listar_screener(desde)]
+        st.session_state[clave] = {"filas": filas, "errores": [], "cuando": pd.Timestamp.now(), "n": len(filas)}
+    return st.session_state[clave]
+
+
 # ------------------------------------------------------------------- render --
 def render() -> None:
     if st.session_state.pop("rastreo_nuevos_limpiar", False):
         st.session_state["rastreo_nuevos"] = ""
-    _universo()
-    r = st.session_state.get(CLAVE_RASTREO)
-    if r:
-        if r["filas"]:
-            _comparacion(_resultados(r))
+    modo = st.segmented_control("Modo", list(MODOS), default=MODOS[0], key="rastreo_modo",
+                                label_visibility="collapsed") or MODOS[0]
+    if modo == MODOS[0]:
+        _universo()
+        r = st.session_state.get(CLAVE_RASTREO)
+        if r:
+            if r["filas"]:
+                _comparacion(_resultados(r))
+            else:
+                with ui.tarjeta("Resultados del rastreo"):
+                    ui.nd("Ningún valor devolvió datos" + (f": {', '.join(r['errores'])}" if r["errores"] else "."))
         else:
             with ui.tarjeta("Resultados del rastreo"):
-                ui.nd("Ningún valor devolvió datos" + (f": {', '.join(r['errores'])}" if r["errores"] else "."))
+                ui.pendiente("Elige las fuentes, añade tickers al universo propio si quieres y pulsa Rastrear: cada valor "
+                             "pasa por los tres motores y aparece aquí con su veredicto, para filtrar, ordenar y comparar.")
     else:
-        with ui.tarjeta("Resultados del rastreo"):
-            ui.pendiente("Elige las fuentes, añade tickers al universo propio si quieres y pulsa Rastrear: cada valor "
-                         "pasa por los tres motores y aparece aquí con su veredicto, para filtrar, ordenar y comparar.")
+        _nocturno()
+        r = _cargar_screener()
+        if r["filas"]:
+            _comparacion(_resultados(r, screener=True))
+        else:
+            with ui.tarjeta("Resultados del screener (rastreo nocturno)"):
+                ui.pendiente(f"Sin análisis del cron en los últimos {SCREENER_MAX_DIAS} días. Activa un índice arriba y espera al "
+                             "pase nocturno (o lánzalo desde GitHub Actions).")
+        if st.button("Recargar", key="scr_recargar", icon=":material/refresh:"):
+            st.session_state["screener_recargar"] = True
+            st.rerun()
     if st.toggle("Evaluación de señales", key="rastreo_eval_toggle",
-                 help="Retorno real de cada análisis guardado (individual o rastreo) frente al índice, por veredicto y por señal"):
+                 help="Retorno real de cada análisis guardado (individual, rastreo o cron) frente al índice, por veredicto y por señal"):
         _evaluacion()

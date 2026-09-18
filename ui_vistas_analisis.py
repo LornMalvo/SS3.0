@@ -5,6 +5,7 @@
   ┌ Contexto (1) ┐ ┌ Gráfico + MACD + fundamentales y técnicos (2) ┐
   └──────────────┘ └ Anotaciones manuales ─────────────────────────┘
   ┌ Calidad / FV ┐ ┌ Timing y señal ┐ ┌ Plan DCA y veredicto ┐
+  ┌ Comparables (peer to peer) ───────────────────────────────────┐
 
 El resultado caro vive en `st.session_state["analisis"]` y solo se recalcula
 al pulsar Analizar. Los cambios baratos (rango, toggle, estrella, nota)
@@ -20,13 +21,18 @@ import streamlit as st
 import datos_analisis
 import datos_traduccion
 import db_supabase
+import core_analistas
 import ui_bloque_calidad_fv
+import ui_bloque_peers
 import ui_bloque_plan
 import ui_bloque_timing
 import ui_componentes as ui
 import ui_graficos
 import ui_metricas
 from config_settings import (
+    ANALISTAS_COLORES,
+    ANALISTAS_ETIQUETAS,
+    C_TEXTO_TENUE,
     DIAS_RANGO,
     EARNINGS_TRIMESTRES,
     RANGO_GRAFICO_DEFECTO,
@@ -148,25 +154,62 @@ def _earnings(a: dict) -> None:
                 unsafe_allow_html=True)
     e = a["earnings"].valor
     divisa = a["fundamentales"].get("divisa")
+    fuentes = (e or {}).get("fuentes") or {}
     if not e or not e.get("pasados"):
-        ui.nd(f"Resultados vs. consenso no disponibles ({ui.escapar(a['earnings'].fuente)})")
+        motivo = ((e or {}).get("errores") or {}).get("finnhub") or a["earnings"].fuente
+        ui.nd(f"Resultados vs. consenso no disponibles ({ui.escapar(motivo)})")
     else:
         ultimo = e["pasados"][0]
         s = ultimo["eps_sorpresa_pct"]
         ui.metrica(f"BPA {ultimo['fecha']:%m/%Y}",
                    f"{ui.fmt_num(ultimo['eps_real'])} vs {ui.fmt_num(ultimo['eps_est'])}",
                    ui.fmt_pct(s), semaforo="bien" if es_dato(s) and s >= 0 else "mal" if es_dato(s) else None)
-        if es_dato(ultimo.get("rev_real")) or es_dato(ultimo.get("rev_est")):   # Yahoo no da ingresos pasados
+        if es_dato(ultimo.get("rev_real")) or es_dato(ultimo.get("rev_est")):   # ingresos solo si alguna fuente los da
             ui.metrica("Ingresos",
                        f"{ui.fmt_importe(ultimo['rev_real'], divisa)} vs {ui.fmt_grande(ultimo['rev_est'])}",
                        ui.fmt_pct(ultimo["rev_sorpresa_pct"]))
         _racha(e["pasados"][:EARNINGS_TRIMESTRES])
+        if fuentes.get("pasados"):
+            st.markdown(f'<div class="ss-anotacion">Histórico: {fuentes["pasados"]}</div>', unsafe_allow_html=True)
     proximo = (e or {}).get("proximo")
     if proximo:
+        # Una fecha sin confirmar por la empresa se dice: el estándar de
+        # fiabilidad de la app no admite enseñar una estimación como cierta.
         eti = f"{proximo['fecha']:%d/%m/%Y}" + (f" ({proximo['hora']})" if proximo.get("hora") else "")
-        ui.metrica("Próximo earnings", eti, f"BPA est. {ui.fmt_num(proximo.get('eps_est'))}")
+        if proximo.get("estimada"):
+            eti += " · prevista, sin confirmar"
+        ref = f"BPA est. {ui.fmt_num(proximo.get('eps_est'))}" + (f" · {fuentes['proximo']}" if fuentes.get("proximo") else "")
+        ui.metrica("Próximo earnings", eti, ref)
     else:
         ui.metrica("Próximo earnings", TEXTO_ND)
+
+
+def _recomendaciones(a: dict) -> None:
+    """Distribución de recomendaciones del último mes (barra apilada), nº de
+    analistas, consenso y revisiones a 3 meses. Informativo: en el Timing
+    solo entra la revisión (core_analistas)."""
+    st.markdown('<div class="ss-racha-tit" style="margin-top:.6rem">Recomendación de analistas</div>',
+                unsafe_allow_html=True)
+    r = a.get("analistas")
+    if not r:
+        ui.nd(f"Sin recomendaciones de analistas ({ui.escapar(a['recomendaciones'].fuente)})")
+        return
+    etiqueta, color = r["consenso"] or ("—", C_TEXTO_TENUE)
+    st.markdown(f'<div class="ss-mini-cab"><span style="font-size:.86rem">{r["n"]} analistas · '
+                f'{r["ultimo"]["periodo"][:7]}</span>{ui.badge(etiqueta, color)}</div>', unsafe_allow_html=True)
+    tramos = "".join(
+        f'<div style="width:{r["pct"][k]:.1f}%;background:{ANALISTAS_COLORES[k]}" title="{ANALISTAS_ETIQUETAS[k]}: {r["ultimo"][k]}"></div>'
+        for k in core_analistas.CLAVES if r["ultimo"].get(k))
+    st.markdown(f'<div class="ss-barra" style="display:flex;height:12px">{tramos}</div>', unsafe_allow_html=True)
+    leyenda = " · ".join(f'<span style="color:{ANALISTAS_COLORES[k]};font-weight:600">{r["ultimo"][k]}</span> '
+                         f'{ANALISTAS_ETIQUETAS[k].lower()}' for k in core_analistas.CLAVES if r["ultimo"].get(k))
+    st.markdown(f'<div class="ss-anotacion">{leyenda}</div>', unsafe_allow_html=True)
+    rev = r.get("revision")
+    sem = "bien" if es_dato(rev) and rev > 0 else "mal" if es_dato(rev) and rev < 0 else None
+    ui.metrica("Revisiones", core_analistas.texto_revision(r) or TEXTO_ND, semaforo=sem)
+    st.markdown(f'<div class="ss-anotacion">Fuente: {ui.escapar(a["recomendaciones"].fuente)}. El nivel es informativo '
+                f'(el sell-side recomienda comprar de forma sistemática); en el Timing solo puntúa la revisión.</div>',
+                unsafe_allow_html=True)
 
 
 def _racha(pasados: list[dict]) -> None:
@@ -191,6 +234,7 @@ def _bloque_contexto(a: dict) -> None:
         st.markdown("")
         _noticias(a)
         _earnings(a)
+        _recomendaciones(a)
         fuente = a["noticias"].fuente if a["noticias"].ok else "yfinance"
         ui.frescura(a["noticias"].obtenido_en, fuente.split(" (")[0] + " + yfinance", "noticias")
 
@@ -226,29 +270,54 @@ def _bloque_grafico(a: dict) -> None:
         st.markdown('<div class="ss-anotacion">Línea de cierre por defecto; pulsa en la leyenda para '
                     'mostrar u ocultar velas, línea y medias móviles.</div>', unsafe_allow_html=True)
 
-        ui_metricas.render(a["fundamentales"], a["indicadores"])
+        ui_metricas.render(a["fundamentales"], a["indicadores"], a.get("referencias"))
         ui.frescura(a["info"].obtenido_en if a["info"].ok else None,
                     "yfinance (fundamentales: info + estados financieros)", "info")
 
 
 def _bloque_anotaciones(a: dict) -> None:
+    """Notas con fecha (sesión 6): cada nota se guarda como entrada propia
+    y se enseña con la fecha y hora en que se añadió en su cabecera."""
     ticker = a["ticker"]
     with ui.tarjeta("Anotaciones manuales"):
-        clave_texto = f"anotacion_{ticker}"
-        if clave_texto not in st.session_state:
-            st.session_state[clave_texto] = db_supabase.leer_anotacion(ticker)
-        texto = st.text_area("Notas", key=clave_texto, height=110, label_visibility="collapsed",
-                             placeholder="Ideas, tesis, dudas sobre este valor…")
+        clave_texto = f"anotacion_nueva_{ticker}"
+        if st.session_state.pop(f"anotacion_limpiar_{ticker}", False):
+            st.session_state[clave_texto] = ""
+        texto = st.text_area("Nueva nota", key=clave_texto, height=90, label_visibility="collapsed",
+                             placeholder="Ideas, tesis, dudas sobre este valor… (la fecha se añade sola)")
         c_btn, c_msg = st.columns([1, 3])
         with c_btn:
-            if st.button("Guardar nota", key=f"guardar_nota_{ticker}", width="stretch"):
-                st.session_state[f"nota_guardada_{ticker}"] = db_supabase.guardar_anotacion(ticker, texto)
+            if st.button("Añadir nota", key=f"guardar_nota_{ticker}", width="stretch", icon=":material/add:",
+                         disabled=not texto.strip()):
+                st.session_state[f"nota_guardada_{ticker}"] = db_supabase.anadir_anotacion(ticker, texto)
+                st.session_state[f"anotacion_limpiar_{ticker}"] = True
+                st.rerun()
         with c_msg:
             estado = st.session_state.pop(f"nota_guardada_{ticker}", None)
             if estado is True:
                 st.caption("Nota guardada" + ("" if db_supabase.disponible() else " (solo en esta sesión)"))
             elif estado is False:
                 st.caption("No se pudo guardar la nota")
+        notas = db_supabase.listar_anotaciones(ticker)
+        if not notas:
+            ui.nd("Sin notas para este valor.")
+            return
+        for n in notas:
+            try:
+                cuando = pd.Timestamp(n["creado_en"]).tz_convert("Europe/Madrid") if pd.Timestamp(n["creado_en"]).tzinfo \
+                    else pd.Timestamp(n["creado_en"])
+                fecha = f"{cuando:%d/%m/%Y · %H:%M}"
+            except Exception:
+                fecha = str(n.get("creado_en") or "")[:10]
+            c_nota, c_del = st.columns([8, 1])
+            with c_nota:
+                st.markdown(f'<div class="ss-nota-cab">{fecha}</div>'
+                            f'<div class="ss-nota-txt">{ui.escapar(n["texto"]).replace(chr(10), "<br>")}</div>',
+                            unsafe_allow_html=True)
+            with c_del:
+                if st.button("", key=f"nota_del_{ticker}_{n['id']}", icon=":material/delete:", help="Eliminar esta nota"):
+                    db_supabase.eliminar_anotacion(ticker, n["id"])
+                    st.rerun()
 
 
 # ------------------------------------------------------------------- render --
@@ -275,3 +344,4 @@ def render() -> None:
         ui_bloque_timing.render(a)
     with c6:
         ui_bloque_plan.render(a)
+    ui_bloque_peers.render(a)

@@ -216,6 +216,13 @@ div[data-testid="stVerticalBlockBorderWrapper"] > div {{ border-radius: 18px; }}
 
 /* --- noticias --- */
 .ss-noticia {{ padding: .35rem 0; border-bottom: 1px solid var(--ss-borde); font-size: .85rem; }}
+
+/* --- anotaciones con fecha (sesión 6) --- */
+.ss-nota-cab {{ font-size: .7rem; font-weight: 700; color: var(--ss-primario); letter-spacing: .06em; margin-top: .3rem; }}
+.ss-nota-txt {{
+  font-size: .84rem; line-height: 1.45; padding: .3rem .55rem; margin-bottom: .25rem;
+  border-left: 3px solid var(--ss-primario); background: #f1f5f9; border-radius: 0 6px 6px 0;
+}}
 .ss-noticia a {{ color: var(--ss-azul); text-decoration: none; font-weight: 600; }}
 .ss-noticia a:hover {{ text-decoration: underline; }}
 .ss-noticia small {{ color: var(--ss-tenue); }}

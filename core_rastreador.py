@@ -4,6 +4,8 @@ análisis para evaluar las señales.
 
 - `fila()` comprime un análisis a lo que necesita la tabla: sin DataFrames
   ni objetos Dato, así N análisis caben en session_state.
+- `fila_desde_historico()` hace lo mismo desde una fila persistida de
+  `analisis_historico` (modo Screener: lo que el cron rastreó de noche).
 - `puntuacion()` es el ranking por defecto (RASTREADOR_PESOS) con veto por
   veredicto: el orden de VEREDICTO_ORDEN manda y la puntuación desempata.
 - `evaluar_senales()` mide qué pasó después de cada análisis guardado
@@ -87,6 +89,31 @@ def fila(a: dict) -> dict:
     return f
 
 
+def fila_desde_historico(h: dict) -> dict:
+    """Resumen plano de una fila de `analisis_historico` (Screener): las
+    mismas claves que `fila()` que se pueden rellenar sin el análisis vivo;
+    las demás quedan None y la comparación lado a lado no se ofrece."""
+    plan = h.get("plan") or {}
+    entradas = [tuple(e) for e in (plan.get("entradas") or [])]
+    salidas = [tuple(x) for x in (plan.get("salidas") or [])]
+    precio = h.get("precio")
+    e1 = entradas[0][1] if entradas else None
+    f = {
+        "ticker": h["ticker"], "nombre": h.get("nombre") or "", "sector": h.get("sector"),
+        "precio": precio, "divisa": h.get("divisa"),
+        "calidad": h.get("calidad"), "perfil": h.get("perfil"),
+        "fair_value": h.get("fair_value"), "upside_pct": h.get("upside_pct"), "banda": h.get("banda"),
+        "timing": h.get("timing"), "timing_bruto": h.get("timing_bruto"), "senal": h.get("senal_timing"),
+        "veredicto": h.get("veredicto"), "fecha": str(h.get("fecha_analisis") or "")[:10],
+        "motor_version": h.get("motor_version"),
+        "e1": e1, "dist_e1_pct": (precio / e1 - 1) * 100 if es_dato(precio) and es_dato(e1) and e1 else None,
+        "stop": plan.get("stop"), "entradas": entradas, "salidas": salidas,
+        "ratio_br": None, "riesgo_pct": None, "beneficio_pct": None,
+    }
+    f["puntuacion"], f["puntuacion_cobertura"] = puntuacion(f)
+    return f
+
+
 def puntuacion(f: dict) -> tuple[float | None, float]:
     """Puntuación de rastreo 0-100 (RASTREADOR_PESOS). El upside se pasa a
     0-100 con el tramo del Timing. Devuelve (nota, cobertura)."""
@@ -119,16 +146,27 @@ def ordenar(filas: list[dict], criterio: str) -> list[dict]:
 
 
 def filtrar(filas: list[dict], calidad_min: float = 0, upside_min: float = -100, timing_min: float = 0,
-            veredictos: tuple[str, ...] | list[str] | None = None, solo_con_dato: bool = False) -> list[dict]:
+            veredictos: tuple[str, ...] | list[str] | None = None, solo_con_dato: bool = False,
+            senales: tuple[str, ...] | list[str] | None = None, sectores: tuple[str, ...] | list[str] | None = None,
+            bandas: tuple[str, ...] | list[str] | None = None, timing_bruto: bool = False) -> list[dict]:
     """Filtro por umbrales. Un valor SIN dato en la métrica filtrada pasa
-    (no se descarta lo que no se ha podido medir) salvo `solo_con_dato`."""
+    (no se descarta lo que no se ha podido medir) salvo `solo_con_dato`.
+    `timing_bruto`: filtra por la nota SIN el gate de calidad (modo
+    "trading" del Screener, etiquetado como tal en la vista)."""
     def ok(v, minimo):
         return (v >= minimo) if es_dato(v) else not solo_con_dato
     out = []
     for f in filas:
-        if not ok(f.get("calidad"), calidad_min) or not ok(f.get("upside_pct"), upside_min) or not ok(f.get("timing"), timing_min):
+        t = f.get("timing_bruto") if timing_bruto and es_dato(f.get("timing_bruto")) else f.get("timing")
+        if not ok(f.get("calidad"), calidad_min) or not ok(f.get("upside_pct"), upside_min) or not ok(t, timing_min):
             continue
         if veredictos and f.get("veredicto") not in veredictos:
+            continue
+        if senales and f.get("senal") not in senales:
+            continue
+        if sectores and f.get("sector") not in sectores:
+            continue
+        if bandas and (f.get("banda") or "").split(" — ")[0] not in bandas:
             continue
         out.append(f)
     return out
