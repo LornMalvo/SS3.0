@@ -10,6 +10,7 @@ cuántas veces se avisa de lo mismo (ver ALERTAS en config_settings):
   movimiento -> "mov:{ticker}:{fecha}"            una vez al día
   reco       -> "reco:{ticker}:{clave}:{fecha}"   una vez al día por recomendación
   resumen    -> "resumen:{fecha}"                 una vez por sesión
+  screener   -> "scr:{ticker}:{motivo}:{fecha}"   una vez al día por ticker y motivo (sesión 7)
 """
 
 from __future__ import annotations
@@ -17,6 +18,10 @@ from __future__ import annotations
 from datetime import date
 
 from config_settings import (
+    SCREENER_ALERTA_CALIDAD_MIN,
+    SCREENER_ALERTA_E1_PCT,
+    SCREENER_ALERTA_MAX,
+    SCREENER_ALERTA_VEREDICTOS,
     ALERTA_CERCA_PCT,
     ALERTA_MOVIMIENTO_PCT,
     ALERTA_RECOS_AVISO,
@@ -121,10 +126,53 @@ def resumen_cierre(resumen: dict, posiciones: dict[str, dict], hoy: date) -> dic
             "texto": "\n".join(lineas)}
 
 
+# ---------------------------------------------------------------- screener --
+def alertas_screener(hoy_filas: list[dict], previos: dict[str, dict], hoy: date) -> list[dict]:
+    """Qué ha cambiado en el rastreo nocturno. Dos motivos:
+      nuevo   el veredicto de hoy está en SCREENER_ALERTA_VEREDICTOS y el
+              del último análisis anterior del cron no (o no había)
+      e1      calidad >= SCREENER_ALERTA_CALIDAD_MIN y el precio ha llegado
+              a E1 (dist_e1_pct <= SCREENER_ALERTA_E1_PCT) sin estarlo antes
+    `hoy_filas`: core_rastreador.fila()/fila_desde_historico de hoy;
+    `previos`: {ticker: fila anterior} (mismo formato). Se devuelven como
+    mucho SCREENER_ALERTA_MAX por motivo, los de mayor puntuación."""
+    nuevos, e1 = [], []
+    for f in hoy_filas:
+        t = f["ticker"]
+        prev = previos.get(t) or {}
+        v, v_prev = f.get("veredicto"), prev.get("veredicto")
+        if v in SCREENER_ALERTA_VEREDICTOS and v_prev not in SCREENER_ALERTA_VEREDICTOS:
+            nuevos.append(f)
+        cal, dist, dist_prev = f.get("calidad"), f.get("dist_e1_pct"), prev.get("dist_e1_pct")
+        if (es_dato(cal) and cal >= SCREENER_ALERTA_CALIDAD_MIN and es_dato(dist) and dist <= SCREENER_ALERTA_E1_PCT
+                and not (es_dato(dist_prev) and dist_prev <= SCREENER_ALERTA_E1_PCT)
+                and v not in ("NO COMPRAR", "REDUCIR")):
+            e1.append(f)
+    puntuacion = lambda f: -(f.get("puntuacion") if es_dato(f.get("puntuacion")) else -1)  # noqa: E731
+    out = []
+    for f in sorted(nuevos, key=puntuacion)[:SCREENER_ALERTA_MAX]:
+        prev = previos.get(f["ticker"]) or {}
+        out.append({"tipo": "screener", "ticker": f["ticker"], "clave": f"scr:{f['ticker']}:nuevo:{hoy.isoformat()}",
+                    "prioridad": 4,
+                    "texto": f"<b>{f['ticker']}</b> pasa a <b>{f['veredicto']}</b>"
+                             + (f" (antes {prev['veredicto']})" if prev.get("veredicto") else " (sin análisis previo)")
+                             + f": calidad {_fmt(f.get('calidad'), 0)}, upside {_pct(f.get('upside_pct'))}, "
+                               f"timing {_fmt(f.get('timing'), 0)}"
+                             + (f", E1 {_fmt(f.get('e1'))} {f.get('divisa') or ''}" if es_dato(f.get("e1")) else "") + "."})
+    for f in sorted(e1, key=puntuacion)[:SCREENER_ALERTA_MAX]:
+        out.append({"tipo": "screener", "ticker": f["ticker"], "clave": f"scr:{f['ticker']}:e1:{hoy.isoformat()}",
+                    "prioridad": 4,
+                    "texto": f"<b>{f['ticker']}</b> toca E1 ({_fmt(f.get('e1'))} {f.get('divisa') or ''}) con calidad "
+                             f"{_fmt(f.get('calidad'), 0)}: cotiza a {_fmt(f.get('precio'))}, {f.get('veredicto') or 'sin veredicto'}, "
+                             f"upside {_pct(f.get('upside_pct'))}."})
+    return out
+
+
 # ----------------------------------------------------------------- mensaje --
 def componer(eventos: list[dict]) -> str:
     """Un solo mensaje Telegram (HTML) con los eventos por prioridad."""
-    titulos = {0: "🛑 STOP", 1: "⚡ Niveles y avisos", 2: "👀 Cerca de un nivel", 3: "📊 Resumen"}
+    titulos = {0: "🛑 STOP", 1: "⚡ Niveles y avisos", 2: "👀 Cerca de un nivel", 3: "📊 Resumen",
+               4: "🔭 Screener nocturno"}
     partes = []
     for prio in sorted({e["prioridad"] for e in eventos}):
         bloque = [e["texto"] for e in eventos if e["prioridad"] == prio]

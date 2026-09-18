@@ -15,11 +15,24 @@ Flujo de cada pase:
   4. recalcula las medianas REALES por sector sobre toda la tabla `multiplos`
      (`sector_referencias`): sustituyen a la semilla de config_sectores en
      Fair Value, Calidad y panel de métricas cuando hay muestra suficiente
-  5. deja constancia del pase en `rastreo_pases`
+  5. rastrea también el índice virtual "Comparables": todos los comparables
+     validados o sugeridos que no hayan caído ya en un índice activo, para
+     que sus múltiplos (y las medianas de comparables) estén siempre al día
+  6. alertas del screener por Telegram (core_alertas.alertas_screener):
+     qué ha cambiado respecto al análisis anterior del cron (nuevos COMPRAR
+     / ACUMULAR y valores con calidad alta que tocan E1), deduplicadas en
+     `alertas_enviadas` como el resto
+  7. los viernes (RASTREO_EVALUAR_DIA_SEMANA) evalúa las señales del cron
+     que acaban de cumplir 3, 6 o 12 meses y las persiste en
+     `backtest_resultados` (parametros.origen = 'cron'); la vista Rastreador
+     las enseña en "Evaluación de señales"
+  8. deja constancia del pase en `rastreo_pases`
 
 `--indice "S&P 500"` rastrea solo ese índice (aunque no esté activo);
-`--max N` limita a N tickers (pruebas); `--simular` no escribe nada;
-`--solo-referencias` salta el rastreo y solo recalcula las medianas.
+`--max N` limita a N tickers (pruebas); `--simular` no escribe ni envía;
+`--solo-referencias` salta el rastreo y solo recalcula las medianas;
+`--evaluar` fuerza la evaluación de señales aunque no sea viernes;
+`--sin-comparables` salta el índice virtual.
 """
 
 from __future__ import annotations
@@ -30,21 +43,32 @@ from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 
+import core_alertas
 import core_cartera
+import core_rastreador
 import core_referencias
 import datos_analisis
 import datos_indices
+import datos_telegram
 import db_supabase
 from config_settings import (
+    BENCHMARK,
     INDICES,
     INDICES_REFRESCO_DIAS,
     PAPER_ESTADOS_ACTIVOS,
+    RASTREADOR_HORIZONTES,
     RASTREO_CRON_MAX_ERRORES_SEGUIDOS,
     RASTREO_CRON_PAUSA_429_SEG,
     RASTREO_CRON_PAUSA_SEG,
+    RASTREO_EVALUAR_DIA_SEMANA,
+    RASTREO_EVALUAR_LOTE,
+    RASTREO_EVALUAR_VENTANA_DIAS,
+    RASTREO_INDICE_COMPARABLES,
     REFERENCIA_SECTOR_MIN,
+    SCREENER_MAX_DIAS,
 )
-from datos_yfinance import obtener_estados_financieros, obtener_historico, obtener_info
+from datos_cache import cubo_mercado
+from datos_yfinance import obtener_cierres_lote, obtener_estados_financieros, obtener_historico, obtener_info
 
 _LIMPIAR_CADA = 40   # tickers: vaciar la caché en memoria para no acumular 500 históricos
 
@@ -99,8 +123,11 @@ def _limpiar_cache() -> None:
             pass
 
 
-def rastrear(nombre: str, tickers: list[str], simular: bool, posiciones: dict) -> tuple[int, int, str, list[str]]:
-    """Analiza en serie. Devuelve (ok, error, estado del pase, tickers fallidos)."""
+def rastrear(nombre: str, tickers: list[str], simular: bool, posiciones: dict,
+             filas_hoy: list[dict] | None = None) -> tuple[int, int, str, list[str]]:
+    """Analiza en serie. Devuelve (ok, error, estado del pase, tickers
+    fallidos); cada análisis se añade a `filas_hoy` comprimido
+    (core_rastreador.fila) para las alertas del screener."""
     ok = err = seguidos = 0
     fallidos: list[str] = []
     estado = "completado"
@@ -125,6 +152,11 @@ def rastrear(nombre: str, tickers: list[str], simular: bool, posiciones: dict) -
         else:
             ok += 1
             seguidos = 0
+            if filas_hoy is not None:
+                try:
+                    filas_hoy.append(core_rastreador.fila(a))
+                except Exception:
+                    pass
             v = (a.get("veredicto") or {}).get("etiqueta")
             print(f"  [{i}/{len(tickers)}] {t}: calidad {_n(a['calidad'].get('nota'))} · upside {_n(a['fair_value'].get('upside_pct'))} · "
                   f"timing {_n((a.get('timing') or {}).get('nota'))} · {v}")
@@ -158,10 +190,78 @@ def recalcular_referencias(simular: bool) -> int:
     return len(salida)
 
 
+def _previos(hoy: date) -> dict[str, dict]:
+    """Último análisis del cron de cada ticker ANTERIOR a hoy, comprimido."""
+    desde = (hoy - timedelta(days=SCREENER_MAX_DIAS)).isoformat()
+    out = {}
+    for h in db_supabase.listar_screener(desde):
+        if str(h.get("fecha_analisis"))[:10] < hoy.isoformat():
+            out[h["ticker"]] = core_rastreador.fila_desde_historico(h)
+    return out
+
+
+def alertar(filas_hoy: list[dict], previos: dict[str, dict], hoy: date, simular: bool) -> int:
+    """Alertas del screener por Telegram, deduplicadas. Devuelve cuántas."""
+    eventos = core_alertas.alertas_screener(filas_hoy, previos, hoy)
+    if not eventos:
+        print("Screener: sin cambios que avisar.")
+        return 0
+    ya = db_supabase.alertas_ya_enviadas([e["clave"] for e in eventos])
+    nuevos = [e for e in eventos if e["clave"] not in ya]
+    print(f"Screener: {len(eventos)} avisos, {len(nuevos)} nuevos")
+    if not nuevos:
+        return 0
+    mensaje = core_alertas.componer(nuevos)
+    if simular:
+        print(mensaje)
+        return len(nuevos)
+    if datos_telegram.enviar(mensaje):
+        for e in nuevos:
+            db_supabase.registrar_alerta(e["tipo"], e["ticker"], e["clave"])
+    else:
+        print("No se pudo enviar por Telegram (se reintentará en el próximo pase).")
+    return len(nuevos)
+
+
+def evaluar_senales_cron(hoy: date, simular: bool) -> int:
+    """Evalúa las señales del cron que acaban de cumplir cada horizonte
+    (ventana de RASTREO_EVALUAR_VENTANA_DIAS días) y las persiste en
+    backtest_resultados. Cierres por lotes de RASTREO_EVALUAR_LOTE tickers;
+    el benchmark se descarga una vez. Devuelve filas guardadas."""
+    fechas = sorted({(hoy - timedelta(days=h + k)).isoformat()
+                     for h in RASTREADOR_HORIZONTES.values() for k in range(RASTREO_EVALUAR_VENTANA_DIAS)})
+    analisis = db_supabase.listar_analisis_cron_en(fechas)
+    if not analisis:
+        print("Evaluación: ninguna señal del cron cumple un horizonte esta semana.")
+        return 0
+    cubo = cubo_mercado()
+    desde = (min(pd.Timestamp(a["fecha_analisis"]) for a in analisis) - timedelta(days=7)).date().isoformat()
+    bench = (obtener_cierres_lote((BENCHMARK,), desde, cubo).valor or {}).get(BENCHMARK)
+    tickers = sorted({a["ticker"] for a in analisis})
+    total = 0
+    for i in range(0, len(tickers), RASTREO_EVALUAR_LOTE):
+        lote = tuple(tickers[i:i + RASTREO_EVALUAR_LOTE])
+        cierres = obtener_cierres_lote(lote, desde, cubo).valor or {}
+        parte = [a for a in analisis if a["ticker"] in lote]
+        detalle, _ = core_rastreador.evaluar_senales(parte, cierres, bench, hoy)
+        filas = core_rastreador.filas_backtest(detalle, origen="cron")
+        if filas and not simular:
+            db_supabase.guardar_backtest(filas)
+        total += len(filas)
+        print(f"  evaluación lote {i // RASTREO_EVALUAR_LOTE + 1}: {len(parte)} señales, {len(filas)} con horizonte cumplido")
+        try:
+            obtener_cierres_lote.clear()
+        except Exception:
+            pass
+        time.sleep(RASTREO_CRON_PAUSA_SEG)
+    return total
+
+
 def main() -> int:
     simular = "--simular" in sys.argv
     solo_indice = _arg("--indice")
     maximo = int(_arg("--max") or 0) or None
+    hoy = date.today()
     if not db_supabase.disponible():
         print("Sin Supabase: nada que rastrear.")
         return 0
@@ -176,19 +276,37 @@ def main() -> int:
         if not objetivo:
             print("Ningún índice activo (actívalos en Rastreador > Rastreo nocturno) y sin --indice.")
         posiciones = _posiciones()
+        previos = _previos(hoy)
+        filas_hoy: list[dict] = []
+        rastreados: set[str] = set()
+        # Índice virtual: comparables validados/sugeridos fuera de los índices.
+        if "--sin-comparables" not in sys.argv and not solo_indice:
+            comparables = db_supabase.listar_comparables_todos()
+            if comparables:
+                objetivo.append({"nombre": RASTREO_INDICE_COMPARABLES, "tickers": comparables,
+                                 "actualizado_en": datetime.now(timezone.utc).isoformat(), "activo": True})
         for fila in objetivo:
-            tickers = _constituyentes(fila, simular)
+            tickers = [t for t in _constituyentes(fila, simular) if t not in rastreados]
             if maximo:
                 tickers = tickers[:maximo]
-            print(f"{fila['nombre']}: {len(tickers)} tickers · {date.today()}" + (" (simulación)" if simular else ""))
+            if not tickers:
+                continue
+            print(f"{fila['nombre']}: {len(tickers)} tickers · {hoy}" + (" (simulación)" if simular else ""))
             pase = None if simular else db_supabase.abrir_pase(fila["nombre"], len(tickers))
             inicio = time.time()
-            ok, err, estado, fallidos = rastrear(fila["nombre"], tickers, simular, posiciones)
+            ok, err, estado, fallidos = rastrear(fila["nombre"], tickers, simular, posiciones, filas_hoy)
+            rastreados |= set(tickers)
             print(f"{fila['nombre']}: {ok} ok, {err} sin datos, {estado} en {(time.time() - inicio) / 60:.0f} min")
             db_supabase.cerrar_pase(pase, estado, ok, err, {"fallidos": fallidos[:100]})
+        if filas_hoy:
+            alertar(filas_hoy, previos, hoy, simular)
     print("Medianas reales por sector:")
     n = recalcular_referencias(simular)
     print(f"{n} sectores con muestra suficiente" + (" (simulación)" if simular else ""))
+    if "--evaluar" in sys.argv or hoy.isoweekday() == RASTREO_EVALUAR_DIA_SEMANA:
+        print("Evaluación de señales del cron:")
+        guardadas = evaluar_senales_cron(hoy, simular)
+        print(f"{guardadas} señales evaluadas" + (" (simulación)" if simular else ""))
     return 0
 
 

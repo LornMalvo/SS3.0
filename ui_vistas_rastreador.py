@@ -355,6 +355,7 @@ def _evaluacion() -> None:
             } for r in resumenes[clave_r]])
             st.dataframe(df, width="stretch", hide_index=True,
                          column_config={c: st.column_config.NumberColumn(format="%+.1f") for c in df.columns if "%" in c or "pp" in c})
+        _evaluacion_cron()
         if st.toggle("Detalle por análisis", key="rastreo_eval_detalle"):
             df = pd.DataFrame([{
                 "Fecha": d["fecha"], "Ticker": d["ticker"], "Veredicto": d["veredicto"], "Señal": d["senal"],
@@ -364,6 +365,29 @@ def _evaluacion() -> None:
             st.dataframe(df, width="stretch", hide_index=True,
                          column_config={c: st.column_config.NumberColumn(format="%+.1f") for c in df.columns if "%" in c})
         ui.frescura(lote.obtenido_en, lote.fuente, "precio")
+
+
+def _evaluacion_cron() -> None:
+    """Señales del rastreo nocturno evaluadas POR EL CRON (viernes) y
+    persistidas en backtest_resultados: aquí solo se leen y se resumen."""
+    st.markdown('<div class="ss-racha-tit" style="margin-top:.8rem">Señales del rastreo nocturno (evaluadas por el cron)</div>',
+                unsafe_allow_html=True)
+    filas = db_supabase.listar_backtest(origen_cron=True)
+    if not filas:
+        ui.nd("Todavía no hay señales del cron con un horizonte cumplido (el cron las evalúa los viernes a partir de los 3 meses).")
+        return
+    res = core_rastreador.resumen_backtest(filas)
+    st.markdown(f'<div class="ss-anotacion">{len(filas)} señales del cron con al menos 3 meses cumplidos. Retorno medio a cada '
+                f'horizonte y diferencia media frente a {BENCHMARK} (pp) en el mismo periodo.</div>', unsafe_allow_html=True)
+    for titulo, clave in (("Por veredicto", "veredicto"), ("Por señal de timing", "senal")):
+        st.markdown(f'<div class="ss-mini-tit">{titulo}</div>', unsafe_allow_html=True)
+        df = pd.DataFrame([{
+            "Grupo": r["grupo"], "N": r["n"], "% positivos 3m": r["pct_positivos_3m"],
+            **{k: v for h in RASTREADOR_HORIZONTES for k, v in ((f"{h} %", r[f"ret_{h}"]), (f"vs {BENCHMARK} {h} pp", r[f"vs_bench_{h}"]),
+                                                                (f"N {h}", r[f"n_{h}"]))},
+        } for r in res[clave]])
+        st.dataframe(df, width="stretch", hide_index=True,
+                     column_config={c: st.column_config.NumberColumn(format="%+.1f") for c in df.columns if "%" in c or "pp" in c})
 
 
 # ---------------------------------------------------------- rastreo nocturno --

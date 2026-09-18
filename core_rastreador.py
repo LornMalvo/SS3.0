@@ -248,9 +248,10 @@ def evaluar_senales(analisis: list[dict], cierres: dict[str, pd.Series], bench: 
     return detalle, {"veredicto": resumen("veredicto"), "senal": resumen("senal")}
 
 
-def filas_backtest(detalle: list[dict]) -> list[dict]:
+def filas_backtest(detalle: list[dict], origen: str | None = None) -> list[dict]:
     """Filas para `backtest_resultados` (solo análisis con al menos el primer
-    horizonte cumplido: antes no hay nada que persistir)."""
+    horizonte cumplido: antes no hay nada que persistir). `origen` queda en
+    `parametros` para distinguir las señales del cron."""
     out = []
     for d in detalle:
         if not es_dato(d.get("ret_3m")):
@@ -260,6 +261,37 @@ def filas_backtest(detalle: list[dict]) -> list[dict]:
             "senal": d.get("veredicto") or d.get("senal") or "", "precio": d.get("precio"),
             "retorno_3m": d.get("ret_3m"), "retorno_6m": d.get("ret_6m"), "retorno_12m": d.get("ret_12m"),
             "bench_3m": d.get("bench_3m"), "bench_6m": d.get("bench_6m"), "bench_12m": d.get("bench_12m"),
-            "parametros": {"senal_timing": d.get("senal")},
+            "parametros": {"senal_timing": d.get("senal"), **({"origen": origen} if origen else {})},
         })
     return out
+
+
+def resumen_backtest(filas: list[dict]) -> dict[str, list[dict]]:
+    """Resúmenes por veredicto (`senal`) y por señal de timing
+    (`parametros.senal_timing`) de las filas persistidas en
+    `backtest_resultados`: n, retorno medio y diferencia media frente al
+    benchmark a cada horizonte, % de positivos a 3 meses."""
+    def resumen(clave_fn) -> list[dict]:
+        grupos: dict[str, list[dict]] = {}
+        for f in filas:
+            grupos.setdefault(clave_fn(f) or "Sin dato", []).append(f)
+        out = []
+        for nombre, items in grupos.items():
+            r = {"grupo": nombre, "n": len(items)}
+            for h in RASTREADOR_HORIZONTES:
+                rets = [x[f"retorno_{h}"] for x in items if es_dato(x.get(f"retorno_{h}"))]
+                difs = [x[f"retorno_{h}"] - x[f"bench_{h}"] for x in items
+                        if es_dato(x.get(f"retorno_{h}")) and es_dato(x.get(f"bench_{h}"))]
+                r[f"ret_{h}"] = sum(rets) / len(rets) if rets else None
+                r[f"vs_bench_{h}"] = sum(difs) / len(difs) if difs else None
+                r[f"n_{h}"] = len(rets)
+            pos = [x["retorno_3m"] for x in items if es_dato(x.get("retorno_3m"))]
+            r["pct_positivos_3m"] = sum(1 for x in pos if x > 0) / len(pos) * 100 if pos else None
+            out.append(r)
+        return out
+    orden_v = VEREDICTO_ORDEN
+    orden_s = ("ENTRAR", "ACUMULAR", "VIGILAR", "ESPERAR", "EVITAR")
+    por_v = sorted(resumen(lambda f: f.get("senal")), key=lambda r: orden_v.index(r["grupo"]) if r["grupo"] in orden_v else 99)
+    por_s = sorted(resumen(lambda f: (f.get("parametros") or {}).get("senal_timing")),
+                   key=lambda r: orden_s.index(r["grupo"]) if r["grupo"] in orden_s else 99)
+    return {"veredicto": por_v, "senal": por_s}

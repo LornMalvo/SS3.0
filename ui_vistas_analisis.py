@@ -30,6 +30,7 @@ import ui_componentes as ui
 import ui_graficos
 import ui_metricas
 from config_settings import (
+    VEREDICTOS,
     ANALISTAS_COLORES,
     ANALISTAS_ETIQUETAS,
     C_TEXTO_TENUE,
@@ -235,6 +236,7 @@ def _bloque_contexto(a: dict) -> None:
         _noticias(a)
         _earnings(a)
         _recomendaciones(a)
+        _historial(a)
         fuente = a["noticias"].fuente if a["noticias"].ok else "yfinance"
         ui.frescura(a["noticias"].obtenido_en, fuente.split(" (")[0] + " + yfinance", "noticias")
 
@@ -273,6 +275,39 @@ def _bloque_grafico(a: dict) -> None:
         ui_metricas.render(a["fundamentales"], a["indicadores"], a.get("referencias"))
         ui.frescura(a["info"].obtenido_en if a["info"].ok else None,
                     "yfinance (fundamentales: info + estados financieros)", "info")
+
+
+def _historial(a: dict) -> None:
+    """Histórico de veredictos del ticker (sesión 7): cada análisis
+    guardado (individual, rastreo o cron) como un punto; con el cron, un
+    valor de un índice activo tiene un punto por día."""
+    st.markdown('<div class="ss-racha-tit" style="margin-top:.6rem">Histórico de veredictos</div>',
+                unsafe_allow_html=True)
+    filas = db_supabase.historial_ticker(a["ticker"])
+    if len(filas) < 2:
+        ui.nd("Aún no hay histórico: hacen falta al menos dos análisis guardados de este valor"
+              + ("" if db_supabase.disponible() else " (sin Supabase no se guardan)") + ".")
+        return
+    colores = {etiqueta: color for etiqueta, color in VEREDICTOS.values()}
+    st.plotly_chart(ui_graficos.grafico_historial(filas, a["fundamentales"].get("divisa_cotizacion") or "", colores),
+                    width="stretch", config={"displayModeBar": False}, key=f"historial_{a['ticker']}")
+    cambios = sum(1 for f0, f1 in zip(filas, filas[1:]) if f0.get("veredicto") != f1.get("veredicto"))
+    origenes = {f.get("origen") or "individual" for f in filas}
+    st.markdown(f'<div class="ss-anotacion">{len(filas)} análisis desde {str(filas[0]["fecha_analisis"])[:10]} '
+                f'({", ".join(sorted(origenes))}) · {cambios} cambios de veredicto · último: '
+                f'<b>{filas[-1].get("veredicto") or "—"}</b> el {str(filas[-1]["fecha_analisis"])[:10]}. '
+                f'Puntos: veredicto de cada análisis sobre el precio; líneas punteadas: calidad y timing (0-100).</div>',
+                unsafe_allow_html=True)
+    with st.expander("Últimos análisis"):
+        df = pd.DataFrame([{
+            "Fecha": str(f["fecha_analisis"])[:10], "Origen": f.get("origen") or "individual",
+            "Veredicto": f.get("veredicto"), "Señal": f.get("senal_timing"), "Precio": f.get("precio"),
+            "Calidad": f.get("calidad"), "Upside %": f.get("upside_pct"), "Timing": f.get("timing"),
+            "Motor": f.get("motor_version"),
+        } for f in reversed(filas[-15:])])
+        st.dataframe(df, width="stretch", hide_index=True, column_config={
+            "Precio": st.column_config.NumberColumn(format="%.2f"), "Calidad": st.column_config.NumberColumn(format="%.0f"),
+            "Upside %": st.column_config.NumberColumn(format="%+.1f"), "Timing": st.column_config.NumberColumn(format="%.0f")})
 
 
 def _bloque_anotaciones(a: dict) -> None:

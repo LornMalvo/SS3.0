@@ -652,6 +652,25 @@ RASTREO_CRON_PAUSA_429_SEG = 90    # tras un límite de Yahoo: parar y seguir
 RASTREO_CRON_MAX_ERRORES_SEGUIDOS = 15   # con tantos fallos seguidos, Yahoo nos ha cortado: abortar el pase
 SCREENER_MAX_DIAS = 10             # el screener enseña el último análisis de cada ticker si no es más viejo que esto
 SCREENER_MAX_FILAS = 5000
+# Alertas del screener (sesión 7): tras el pase nocturno, un mensaje Telegram
+# con lo que ha CAMBIADO: valores que hoy son COMPRAR / ACUMULAR y ayer no
+# lo eran, y valores con calidad >= mínimo cuyo precio ha llegado a E1.
+# Se limita a los mejores por puntuación para que el mensaje se lea.
+SCREENER_ALERTA_VEREDICTOS = ("COMPRAR", "ACUMULAR POR TRAMOS")
+SCREENER_ALERTA_CALIDAD_MIN = 70
+SCREENER_ALERTA_E1_PCT = 0.0        # precio <= E1 (distancia % a E1 <= este valor) cuenta como "ha llegado"
+SCREENER_ALERTA_MAX = 6
+# Comparables validados como índice virtual del cron: sus múltiplos se
+# refrescan cada noche aunque no estén en ningún índice activo.
+RASTREO_INDICE_COMPARABLES = "Comparables"
+# Evaluación de señales del cron (backtest): se hace en el propio cron,
+# una vez por semana (día ISO: 5 = viernes) sobre las señales que acaban
+# de cumplir cada horizonte (ventana de días), y se persiste en
+# backtest_resultados. Tickers por lote de descarga de cierres.
+RASTREO_EVALUAR_DIA_SEMANA = 5
+RASTREO_EVALUAR_VENTANA_DIAS = 8
+RASTREO_EVALUAR_LOTE = 100
+HISTORIAL_TICKER_MAX = 250          # análisis guardados que enseña el histórico de veredictos de un ticker
 
 # ================================================================= ALERTAS ====
 # Reglas del cron (tarea_alertas.py, GitHub Actions cada hora en sesión).

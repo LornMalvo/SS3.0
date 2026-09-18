@@ -182,3 +182,41 @@ def grafico_correlacion(matriz: pd.DataFrame) -> go.Figure:
         yaxis=dict(autorange="reversed"),
     )
     return fig
+
+
+def grafico_historial(filas: list[dict], divisa: str = "", colores_veredicto: dict | None = None) -> go.Figure:
+    """Histórico de veredictos de un ticker (sesión 7): precio del análisis
+    (eje izquierdo) con un punto por análisis coloreado por veredicto, y
+    calidad y timing (eje derecho, 0-100). Una fila por día."""
+    colores_veredicto = colores_veredicto or {}
+    x = [pd.Timestamp(f["fecha_analisis"]) for f in filas]
+    precio = [f.get("precio") for f in filas]
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Scatter(x=x, y=precio, mode="lines", name="Precio", line=dict(color=C_AZUL, width=1.4),
+                             hovertemplate="Precio: %{y:,.2f} " + divisa + "<extra></extra>"), secondary_y=False)
+    fig.add_trace(go.Scatter(
+        x=x, y=precio, mode="markers", name="Veredicto",
+        marker=dict(size=9, color=[colores_veredicto.get(f.get("veredicto"), C_TEXTO_TENUE) for f in filas],
+                    line=dict(width=1, color="#ffffff")),
+        text=[f'{f.get("veredicto") or "—"} · {f.get("senal_timing") or "—"} · upside {f.get("upside_pct"):+.0f} %'
+              if f.get("upside_pct") is not None else f'{f.get("veredicto") or "—"} · {f.get("senal_timing") or "—"}'
+              for f in filas],
+        hovertemplate="%{text}<extra></extra>"), secondary_y=False)
+    fig.add_trace(go.Scatter(x=x, y=[f.get("calidad") for f in filas], mode="lines", name="Calidad",
+                             line=dict(color=C_PRIMARIO, width=1.2, dash="dot"),
+                             hovertemplate="Calidad: %{y:.0f}<extra></extra>"), secondary_y=True)
+    fig.add_trace(go.Scatter(x=x, y=[f.get("timing") for f in filas], mode="lines", name="Timing",
+                             line=dict(color=C_VERDE, width=1.2, dash="dot"),
+                             hovertemplate="Timing: %{y:.0f}<extra></extra>"), secondary_y=True)
+    fig.update_layout(
+        height=240, margin=dict(l=6, r=6, t=26, b=6), hovermode="x unified",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", y=1.02, x=0, yanchor="bottom", font=dict(size=9)),
+        font=dict(family="Inter, Segoe UI, system-ui, sans-serif", color=C_TEXTO_TENUE, size=10),
+        hoverlabel=dict(bgcolor="#ffffff", bordercolor="#e2e8f0", font=dict(size=10, color="#0f172a")),
+    )
+    fig.update_yaxes(gridcolor="#e2e8f0", zeroline=False, secondary_y=False)
+    fig.update_yaxes(range=[0, 100], showgrid=False, zeroline=False, secondary_y=True)
+    fig.update_xaxes(gridcolor="#e2e8f0", showspikes=True, spikemode="across", spikethickness=1,
+                     spikecolor="#94a3b8", spikedash="dot")
+    return fig

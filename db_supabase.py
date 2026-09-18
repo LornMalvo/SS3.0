@@ -405,6 +405,92 @@ def guardar_backtest(filas: list[dict]) -> bool:
         return False
 
 
+def historial_ticker(ticker: str) -> list[dict]:
+    """Análisis guardados del ticker (todos los orígenes), más antiguo
+    primero, para el histórico de veredictos de Análisis Individual."""
+    from config_settings import HISTORIAL_TICKER_MAX
+    cli = _cliente()
+    if cli is None:
+        return []
+    try:
+        filas = (cli.table("analisis_historico")
+                 .select("fecha_analisis,motor_version,origen,precio,divisa,calidad,fair_value,upside_pct,timing,timing_bruto,"
+                         "senal_timing,veredicto")
+                 .eq("ticker", ticker).order("fecha_analisis", desc=True).order("id", desc=True)
+                 .limit(HISTORIAL_TICKER_MAX).execute().data or [])
+    except Exception:
+        return []
+    vistos: dict[str, dict] = {}
+    for f in filas:                                  # un punto por día: el más reciente del día manda
+        vistos.setdefault(str(f["fecha_analisis"])[:10], f)
+    return [vistos[k] for k in sorted(vistos)]
+
+
+def listar_analisis_cron_en(fechas: list[str]) -> list[dict]:
+    """Análisis del cron cuya fecha está en la lista (ventanas de
+    evaluación): una consulta paginada, sin JSON de entradas."""
+    cli = _cliente()
+    if cli is None or not fechas:
+        return []
+    filas: list[dict] = []
+    try:
+        paso = 1000
+        for inicio in range(0, 50000, paso):
+            lote = (cli.table("analisis_historico")
+                    .select("id,ticker,fecha_analisis,motor_version,precio,divisa,senal_timing,veredicto,origen")
+                    .eq("origen", "cron").in_("fecha_analisis", fechas).order("id")
+                    .range(inicio, inicio + paso - 1).execute().data or [])
+            filas += lote
+            if len(lote) < paso:
+                break
+    except Exception:
+        return filas
+    return filas
+
+
+def listar_backtest(origen_cron: bool = True) -> list[dict]:
+    """Filas de `backtest_resultados` (evaluación persistida). Con
+    `origen_cron` solo las que escribió el cron (parametros.origen = 'cron')."""
+    cli = _cliente()
+    if cli is None:
+        return []
+    filas: list[dict] = []
+    try:
+        paso = 1000
+        for inicio in range(0, 50000, paso):
+            lote = (cli.table("backtest_resultados").select("*").order("fecha_senal")
+                    .range(inicio, inicio + paso - 1).execute().data or [])
+            filas += lote
+            if len(lote) < paso:
+                break
+    except Exception:
+        return filas
+    if origen_cron:
+        filas = [f for f in filas if (f.get("parametros") or {}).get("origen") == "cron"]
+    return filas
+
+
+def listar_comparables_todos() -> list[str]:
+    """Todos los tickers que figuran como comparable validado o sugerido
+    (no rechazado), en cualquier dirección: el índice virtual del cron."""
+    cli = _cliente()
+    if cli is None:
+        m = _memoria("comparables", {})
+        return sorted({p for d in m.values() for p, o in d.items() if o != "rechazado"} | set(m))
+    filas: list[dict] = []
+    try:
+        paso = 1000
+        for inicio in range(0, 20000, paso):
+            lote = (cli.table("comparables").select("ticker,peer").neq("origen", "rechazado")
+                    .range(inicio, inicio + paso - 1).execute().data or [])
+            filas += lote
+            if len(lote) < paso:
+                break
+    except Exception:
+        return []
+    return sorted({f["peer"] for f in filas} | {f["ticker"] for f in filas})
+
+
 # ------------------------------------------------------------------ cartera --
 def listar_operaciones(origen: str = "real", ticker: str | None = None) -> list[dict]:
     """Libro de operaciones por orden cronológico (fecha, id): el orden es
