@@ -1,0 +1,38 @@
+# Copiar a .github/workflows/rastreo.yml (única carpeta del repo).
+# Rastreo nocturno de los índices activos: de lunes a viernes a las 22:30
+# UTC (tras el cierre de EE. UU.). Un S&P 500 entero tarda ~1 h; el job
+# tiene margen hasta 5 h. Mismos secretos que alertas.yml.
+name: rastreo
+on:
+  schedule:
+    - cron: "30 22 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      indice:
+        description: "Índice concreto (vacío = todos los activos)"
+        required: false
+        default: ""
+      max:
+        description: "Máximo de tickers (pruebas; vacío = todos)"
+        required: false
+        default: ""
+jobs:
+  rastreo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.indice }}" ]; then ARGS="$ARGS --indice \"${{ github.event.inputs.indice }}\""; fi
+          if [ -n "${{ github.event.inputs.max }}" ]; then ARGS="$ARGS --max ${{ github.event.inputs.max }}"; fi
+          eval python tarea_rastreo.py $ARGS
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          FINNHUB_KEY: ${{ secrets.FINNHUB_KEY }}
